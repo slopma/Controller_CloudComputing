@@ -7,10 +7,7 @@
     "launchTemplateVersion": "$Latest",
     "minInstances": 1,
     "maxInstances": 5,
-    "subnetIds": [
-      "subnet-xxxx",
-      "subnet-yyyy"
-    ],
+    "subnetIds": ["subnet-xxxx", "subnet-yyyy"],
     "securityGroupIds": []
   },
   "loadBalancer": {
@@ -20,46 +17,36 @@
   "pollIntervalSeconds": 60,
   "observationWindowSeconds": 300,
   "cooldownSeconds": 300,
+
+  "scaleUpStep": 1,
+  "scaleDownStep": 1,
+  "confirmCyclesDown": 3,
+
+  "statusPort": 8080,
+  "stateFile": "controller-state.json",
+
   "metrics": [
     {
       "namespace": "AWS/ApplicationELB",
       "metricName": "RequestCountPerTarget",
       "dimensions": [
-        {
-          "name": "TargetGroup",
-          "value": "targetgroup/mi-tg/xxxx"
-        },
-        {
-          "name": "LoadBalancer",
-          "value": "app/mi-alb/yyyy"
-        }
+        { "name": "TargetGroup",  "value": "targetgroup/mi-tg/xxxx" },
+        { "name": "LoadBalancer", "value": "app/mi-alb/yyyy" }
       ],
       "period": 60,
       "stat": "Sum",
-      "scaling": {
-        "scaleUpThreshold": 1000,
-        "scaleDownThreshold": 200
-      }
+      "scaling": { "scaleUpThreshold": 1000, "scaleDownThreshold": 200 }
     },
     {
       "namespace": "AWS/ApplicationELB",
       "metricName": "TargetResponseTime",
       "dimensions": [
-        {
-          "name": "TargetGroup",
-          "value": "targetgroup/mi-tg/xxxx"
-        },
-        {
-          "name": "LoadBalancer",
-          "value": "app/mi-alb/yyyy"
-        }
+        { "name": "TargetGroup",  "value": "targetgroup/mi-tg/xxxx" },
+        { "name": "LoadBalancer", "value": "app/mi-alb/yyyy" }
       ],
       "period": 60,
       "stat": "Average",
-      "scaling": {
-        "scaleUpThreshold": 0.5,
-        "scaleDownThreshold": 0.1
-      }
+      "scaling": { "scaleUpThreshold": 0.5, "scaleDownThreshold": 0.1 }
     },
     {
       "namespace": "AWS/EC2",
@@ -67,13 +54,8 @@
       "perInstance": true,
       "period": 60,
       "stat": "Average",
-      "scaling": {
-        "scaleUpThreshold": 70,
-        "scaleDownThreshold": 20
-      }
+      "scaling": { "scaleUpThreshold": 70, "scaleDownThreshold": 20 }
     }
   ],
-  "deployment": {
-    "useDocker": false
-  }
+  "deployment": { "useDocker": false }
 }

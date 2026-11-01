@@ -492,16 +492,29 @@ adicionales en `observer/` y `provisioner/`.
 
 ---
 
+---
+
+## Mejoras implementadas respecto a la versión base
+
+1. **Histéresis temporal para ScaleDown (`confirmCyclesDown`)**: Requiere $N$ ciclos consecutivos con todas las métricas bajo el umbral antes de retirar una instancia, eliminando oscilaciones por variaciones transitorias de carga (*flapping*).
+2. **Pasos de escala configurables (`scaleUpStep` / `scaleDownStep`)**: Permite ajustar cuántas instancias se lanzan o retiran por acción en lugar de limitarse a 1.
+3. **Persistencia del Cooldown (`stateFile`)**: Guarda en disco `lastActionAt` en formato JSON, permitiendo que el estado de enfriamiento sobreviva reinicios del proceso o fallos de servicio.
+4. **Endpoint de salud y estado HTTP (`statusPort`)**: Expone un micro-servidor HTTP (`GET /health` y `GET /status`) para chequeos de salud de systemd, load balancers o paneles de observabilidad sin necesidad de parsear archivos de log.
+5. **Auditoría enriquecida**: Los registros en `decisions.jsonl` ahora incluyen `CycleID` secuencial, `ConfirmCycle` acumulado, y `CapacityBefore`/`CapacityAfter` para trazabilidad inmediata.
+6. **Generador de carga para pruebas (`infra/load.sh`)**: Script automatizado de 3 fases (baseline, alta carga y descenso) compatible con `hey` y Apache Bench (`ab`).
+7. **Política IAM mínima (`infra/iam-policy.json`)**: Política de mínimo privilegio con las acciones exactas requeridas por el controller.
+8. **Script de análisis y visualización (`analysis/analyze.py`)**: Analizador de métricas y generador de gráficas de capacidad/decisiones temporales.
+9. **Documentación del Challenge**:
+   - `docs/taxonomy.md`: Clasificación taxonómica completa según Al-Dhuraibi et al. (Requisito Sección 5).
+   - `docs/critical-analysis.md`: Análisis crítico de desempeño, SLO, costos y respuestas a las preguntas de sustentación (Requisito Sección 10.4 y 12).
+
+---
+
 ## Limitaciones y notas
 
-- **El cooldown vive solo en memoria.** Tras un reinicio del proceso, el
-  controller olvida cuándo fue la última acción y puede actuar en el primer tick.
-- **Sin coordinación entre instancias.** No hay *locking* ni elección de líder:
-  ejecuta un único controller por conjunto de recursos.
-- **La actuación bloquea el ciclo.** Un *ScaleUp* espera hasta 3 min a que la
-  instancia esté `running`; durante ese tiempo no se procesan nuevos ticks.
-- **Alcance de prueba/educativo**: pensado para flotas pequeñas (máx. 5
-  instancias) y un objetivo de aprendizaje, no como reemplazo de un ASG en producción.
+- **Sin coordinación distribuida entre instancias.** No hay *locking* distribuido (p. ej. DynamoDB o etcd) ni elección de líder: se debe ejecutar un único proceso controller por conjunto de recursos.
+- **La actuación bloquea el ciclo.** Un *ScaleUp* espera hasta 3 min a que la instancia esté en estado `running`; durante ese tiempo no se procesan nuevos ticks en el bucle principal.
+- **Alcance educativo**: Diseñado para flotas pequeñas (mín. 1, máx. 5 instancias) de acuerdo con los límites del Learning Challenge y las cuotas de AWS Academy.
 
 ---
 
@@ -509,16 +522,26 @@ adicionales en `observer/` y `provisioner/`.
 
 ```
 ControllerASG/
-├── main/            # punto de entrada
-├── controller/     # bucle observar→decidir→actuar y lógica de decisión
-├── observer/       # consulta de métricas en CloudWatch
-├── provisioner/    # actuación sobre EC2 y ELBv2 (Fleet + Actuator)
-├── configuration/  # carga y validación de conf.json
-├── logger/         # log de decisiones en JSON Lines
-├── model/          # tipos de dominio
-├── infra/          # scripts para crear/destruir infraestructura de prueba
-├── init.sh         # configurar + compilar + validar + arrancar (interactivo)
-├── conf.json       # configuración activa (no versionada)
-├── conf.example.json
-└── decisions.jsonl # log de decisiones (generado)
+├── main/            # Punto de entrada (flags, carga AWS, bucle ticker, servidor status)
+├── controller/     # Bucle observar→decidir→actuar, histéresis y persistencia
+├── observer/       # Consulta y agregación de métricas en CloudWatch
+├── provisioner/    # Actuación sobre EC2 y ELBv2 (Fleet + Actuator)
+├── configuration/  # Carga, valores por defecto y validación estricta de conf.json
+├── statusserver/   # Servidor HTTP (/health, /status)
+├── logger/         # Log estructurado de decisiones en JSON Lines
+├── model/          # Tipos de dominio (DecisionRecord, Instance, Metric)
+├── docs/           # Entregables teóricos y de análisis
+│   ├── taxonomy.md          # Taxonomía según Al-Dhuraibi et al.
+│   └── critical-analysis.md # Análisis crítico, SLO, costos y respuestas a preguntas
+├── infra/          # Scripts para crear/destruir infraestructura y pruebas
+│   ├── up.sh                # Provisiona VPC, SG, ALB, TG, Launch Template
+│   ├── down.sh              # Destruye la infraestructura de prueba
+│   ├── load.sh              # Generador de carga de 3 fases (hey / ab)
+│   ├── iam-policy.json      # Política IAM de mínimo privilegio
+│   └── user-data.sh         # Script de arranque de Nginx en instancias
+├── analysis/       # Herramientas de evaluación
+│   └── analyze.py           # Análisis estadístico y gráfico de decisions.jsonl
+├── init.sh         # Asistente interactivo: configurar + compilar + validar + arrancar
+├── conf.example.json # Plantilla de configuración documentada
+└── decisions.jsonl # Log auditable de decisiones tomadas (generado en ejecución)
 ```

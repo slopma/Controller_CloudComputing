@@ -1,0 +1,15 @@
+# Binarios
+controllerasg
+*.exe
+*.test
+
+# Configuración y estado de ejecución
+conf.json
+infra/state.env
+controller-state.json
+decisions_analysis.png
+
+# Entornos virtuales / temporales
+__pycache__/
+*.pyc
+.env
