@@ -5,7 +5,7 @@
 #   ./init.sh
 #
 # Si ya existe conf.json en el directorio, sus valores se ofrecen como
-# default (Enter los conserva). Requiere Go y credenciales de AWS ya
+# default (Enter los conserva). Requiere Python 3 y credenciales de AWS ya
 # configuradas (ver README.md); este script no toca la cuenta de AWS, solo
 # escribe conf.json y valida su forma.
 set -euo pipefail
@@ -14,8 +14,8 @@ cd "$(dirname "$0")"
 CONF="conf.json"
 LOG="decisions.jsonl"
 
-command -v go >/dev/null || { echo "Falta Go. Instálalo antes de continuar."; exit 1; }
-command -v python3 >/dev/null || { echo "Falta python3 (se usa para leer/escribir conf.json)."; exit 1; }
+command -v python3 >/dev/null || { echo "Falta python3. Instálalo antes de continuar."; exit 1; }
+python3 -c "import boto3" 2>/dev/null || { echo "Falta boto3. Instálalo con: pip install -r requirements.txt"; exit 1; }
 
 # ---- helpers ---------------------------------------------------------
 
@@ -205,9 +205,7 @@ PY
 echo
 echo "== conf.json escrito =="
 
-echo "== Compilando =="
-mkdir -p bin
-go build -o bin/controllerasg ./main
+chmod +x bin/controllerasg main.py 2>/dev/null || true
 
 echo "== Validando configuración (sin contactar AWS) =="
 ./bin/controllerasg -config "$CONF" -check

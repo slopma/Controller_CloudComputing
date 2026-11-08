@@ -2,13 +2,13 @@
 # infra/load.sh — Generador de carga para el experimento del controller.
 #
 # Ejecuta un experimento de 3 fases diseñado para provocar ScaleUp y ScaleDown:
-#   Fase 1 (baseline):     carga baja  → el controller debe MAINTAIN_CAPACITY
-#   Fase 2 (alta demanda): carga alta  → el controller debe INCREASE_CAPACITY
-#   Fase 3 (descenso):     carga baja  → el controller debe REDUCE_CAPACITY
+#   Fase 1 (carga inicial): carga baja  → el controller debe MAINTAIN_CAPACITY
+#   Fase 2 (alta demanda):  carga alta  → el controller debe INCREASE_CAPACITY
+#   Fase 3 (descenso):      carga baja  → el controller debe REDUCE_CAPACITY
 #
 # Requisitos:
-#   - hey (https://github.com/rakyll/hey): go install github.com/rakyll/hey@latest
-#   - O ab (Apache Bench): sudo apt install apache2-utils
+#   - ab (Apache Bench): sudo apt install apache2-utils
+#   - O hey (generador HTTP alternativo)
 #   - infra/state.env con LB_DNS relleno (generado por up.sh)
 #
 # Uso:
@@ -38,14 +38,15 @@ if [ "$USE_AB" = "1" ]; then
     command -v ab >/dev/null || { echo "[load] Error: 'ab' no encontrado. Instala: sudo apt install apache2-utils"; exit 1; }
     TOOL="ab"
 else
-    command -v hey >/dev/null || {
-        echo "[load] 'hey' no encontrado. Intentando instalar con go..."
-        go install github.com/rakyll/hey@latest 2>/dev/null && export PATH="$PATH:$(go env GOPATH)/bin" || {
-            echo "[load] No se pudo instalar 'hey'. Usa USE_AB=1 para usar Apache Bench."
-            exit 1
-        }
-    }
-    TOOL="hey"
+    if command -v hey >/dev/null; then
+        TOOL="hey"
+    elif command -v ab >/dev/null; then
+        echo "[load] 'hey' no encontrado; usando 'ab' (Apache Bench) automáticamente."
+        TOOL="ab"
+    else
+        echo "[load] No se encontró 'hey' ni 'ab'. Instala Apache Bench con: sudo apt install apache2-utils"
+        exit 1
+    fi
 fi
 
 # ---- Función de carga ----
@@ -74,9 +75,9 @@ send_load() {
 # ============================================================
 
 echo ""
-echo "Fase 1 — BASELINE (carga baja, 5 min)"
+echo "Fase 1 — CARGA INICIAL (carga baja, 5 min)"
 echo "  Objetivo: el controller debe MAINTAIN_CAPACITY"
-send_load "Baseline" 10 300 5
+send_load "Carga inicial" 10 300 5
 
 echo ""
 echo "Fase 2 — CARGA ALTA (10 min)"

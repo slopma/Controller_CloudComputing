@@ -113,7 +113,7 @@ La arquitectura centralizada crea un *single point of failure*: si el proceso de
 | Dimensión | Valor | Detalle |
 |-----------|-------|---------|
 | **Proveedor** | Single-cloud (AWS exclusivo) | Todos los componentes son servicios AWS: EC2, ELBv2, CloudWatch. |
-| **Portabilidad** | Baja | El código usa el SDK de AWS Go v2; migrar a otro proveedor requeriría reimplementar `observer` y `provisioner`. |
+| **Portabilidad** | Baja | El código usa el SDK de AWS para Python (`boto3`); migrar a otro proveedor requeriría reimplementar `observer` y `provisioner`. |
 | **Servicios propios usados** | EC2, ALB, CloudWatch | No se usan servicios de escalado gestionado de AWS (Auto Scaling Groups con políticas dinámicas). |
 
 **¿Impuesta o diseño propio?**  

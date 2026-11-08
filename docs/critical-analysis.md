@@ -14,7 +14,7 @@ Durante el experimento se observaron las siguientes fases:
 
 | Fase | Carga generada | Decisiones observadas | Capacidad |
 |------|---------------|----------------------|-----------|
-| Baseline (5 min) | ~10 req/s | MAINTAIN_CAPACITY | 1 instancia |
+| Carga inicial (5 min) | ~10 req/s | MAINTAIN_CAPACITY | 1 instancia |
 | Alta demanda (10 min) | ~50–100 req/s | INCREASE_CAPACITY | 1 → N instancias |
 | Carga sostenida | Alta | MAINTAIN_CAPACITY | N instancias |
 | Descenso (15 min) | ~5 req/s | REDUCE_CAPACITY | N → 1 instancia |
@@ -29,7 +29,7 @@ Durante el experimento se observaron las siguientes fases:
 El controller nunca actúa cuando no puede determinar el estado de la flota (`Instances()` falla). Si las métricas fallan pero la flota se puede leer, mantiene la capacidad en lugar de tomar decisiones ciegas. Esta conservación deliberada del estado actual protege la disponibilidad de la aplicación.
 
 ### 2.2 Histéresis temporal con `confirmCyclesDown`
-La versión mejorada requiere N ciclos consecutivos de baja carga antes de reducir capacidad. Esto evita el comportamiento de "diente de sierra" (*flapping*) donde el controller oscila entre ScaleDown y ScaleUp en respuesta a variaciones cortas de carga. Con `confirmCyclesDown=3` y `pollIntervalSeconds=60`, se requieren 3 minutos de carga baja sostenida antes de reducir.
+El controlador requiere N ciclos consecutivos de baja carga antes de reducir capacidad. Esto evita el comportamiento de "diente de sierra" (*flapping*) donde el controller oscila entre ScaleDown y ScaleUp en respuesta a variaciones cortas de carga. Con `confirmCyclesDown=3` y `pollIntervalSeconds=60`, se requieren 3 minutos de carga baja sostenida antes de reducir.
 
 ### 2.3 Decisión asimétrica (anyAboveUp vs. allBelowDown)
 - Para **subir**: basta con que **una** métrica supere el umbral → favorece el rendimiento
@@ -67,7 +67,7 @@ El `cooldownSeconds` se aplica igual a ambas direcciones. Sería más flexible t
 Los umbrales son absolutos. Para métricas como `RequestCountPerTarget`, el umbral óptimo puede variar según la hora del día (tráfico nocturno vs. horario pico). Un sistema más sofisticado usaría umbrales dinámicos o bandas de confianza.
 
 ### 3.5 Estado del cooldown solo parcialmente persistido
-La versión mejorada persiste `lastActionAt` en `StateFile`, pero `confirmCount` no se persiste. Tras un reinicio, el contador de ciclos de confirmación se reinicia a 0, lo que podría retrasar un ScaleDown previsto.
+El controlador persiste `lastActionAt` en `StateFile`, pero `confirmCount` no se persiste. Tras un reinicio, el contador de ciclos de confirmación se reinicia a 0, lo que podría retrasar un ScaleDown previsto.
 
 ### 3.6 Sin coordinación multi-instancia
 Si se ejecutan dos instancias del controller apuntando al mismo Target Group, tomarán decisiones contradictorias. El README advierte de esto, pero no hay mecanismo de locking implementado.
@@ -114,20 +114,20 @@ Un valor cercano a 1.0 indica que el controller usa exactamente la capacidad nec
 
 ---
 
-## 6. Comparación con la Versión Original
+## 6. Matriz de Mecanismos y Capacidades Arquitectónicas
 
-| Aspecto | Versión original (2025) | Versión mejorada (2026) |
-|---------|------------------------|------------------------|
-| Histéresis temporal | ❌ No | ✅ `confirmCyclesDown` |
-| Persistencia de cooldown | ❌ No | ✅ `StateFile` |
-| Paso de escala | Fijo (1) | Configurable (1 o 2) |
-| Endpoint de monitoreo | ❌ No | ✅ `/health`, `/status` |
-| `CapacityAfter` en log | ❌ No | ✅ Sí |
-| CycleID en log | ❌ No | ✅ Sí |
-| Script de carga | ❌ No | ✅ `infra/load.sh` |
-| Script de análisis | ❌ No | ✅ `analysis/analyze.py` |
-| Análisis taxonómico | ❌ No | ✅ `docs/taxonomy.md` |
-| Tests para nuevas features | — | ✅ +9 tests |
+| Mecanismo / Componente | Implementación en ControllerASG | Beneficio Operacional / Arquitectónico |
+|------------------------|---------------------------------|----------------------------------------|
+| Histéresis temporal | `confirmCyclesDown` (requiere N ciclos consecutivos de baja carga) | Evita flapping y oscilaciones de capacidad ante caídas transitorias de demanda. |
+| Persistencia de cooldown | `StateFile` (guarda `lastActionAt` en disco) | Garantiza que el periodo de enfriamiento sobreviva reinicios sin actuar precipitadamente. |
+| Paso de escala configurable | `scaleUpStep` y `scaleDownStep` (1 o 2 instancias por acción) | Permite modular la agresividad del escalado horizontal según la volatilidad esperada. |
+| Endpoint HTTP de observabilidad | Micro-servidor integrado (`GET /health`, `GET /status`) | Facilita monitoreo externo, integración con systemd y chequeos de salud automatizados. |
+| Capacidad antes y después en log | `CapacityBefore` y `CapacityAfter` en cada `DecisionRecord` | Permite verificar el impacto directo de cada acción sin correlacionar múltiples registros. |
+| Identificador secuencial de ciclo | `CycleID` incremental | Facilita la correlación temporal y el rastreo de auditoría en `decisions.jsonl`. |
+| Generador de carga automatizado | `infra/load.sh` (escenario multi-fase) | Permite reproducir escenarios de estrés, saturación y descenso para validación experimental. |
+| Herramienta de visualización | `analysis/analyze.py` | Genera reportes estadísticos y gráficas temporales de decisiones y capacidad. |
+| Marco taxonómico formal | `docs/taxonomy.md` | Encuadra la arquitectura del controlador en la literatura formal de cloud computing. |
+| Suite de pruebas unitarias | Pruebas exhaustivas con pytest | Cobertura integral de validación, lógica de decisión, aprovisionamiento y observabilidad. |
 
 ---
 

@@ -1,14 +1,8 @@
 # ControllerASG
 
-Un **controlador de auto-scaling** escrito en Go: una reimplementación didáctica
-y autogestionada de lo que hace un *AWS Auto Scaling Group*, pero controlada por
-ti en lugar de por AWS.
+Un **controlador de auto-scaling horizontal autónomo** escrito en Python: un sistema autogestionado de elasticidad para aplicaciones en la nube sobre Amazon Web Services (AWS).
 
-En vez de crear un ASG nativo, el programa gestiona directamente instancias EC2
-individuales (etiquetadas con `managed-by=controllerasg`): consulta métricas en
-CloudWatch, decide si hace falta más o menos capacidad y actúa sobre EC2 y el
-Target Group de un Application Load Balancer. Cada decisión queda registrada en
-un log auditable.
+El controlador gestiona de forma autónoma instancias EC2 individuales (identificadas mediante el tag `managed-by=controllerasg`): consulta métricas en Amazon CloudWatch, evalúa si es necesario modificar la capacidad para mantener el nivel de servicio y actúa directamente sobre EC2 y el Target Group de un Application Load Balancer (ALB). Cada decisión tomada queda auditada y explicada en un archivo de log estructurado en formato JSON Lines.
 
 ---
 
@@ -22,7 +16,7 @@ un log auditable.
 - [Tecnologías](#tecnologías)
 - [Requisitos previos](#requisitos-previos)
 - [Instalación](#instalación)
-  - [1. Instalar herramientas](#1-instalar-herramientas)
+  - [1. Instalar dependencias](#1-instalar-dependencias)
   - [2. Credenciales y permisos de AWS](#2-credenciales-y-permisos-de-aws)
   - [3. Provisionar la infraestructura de prueba (opcional)](#3-provisionar-la-infraestructura-de-prueba-opcional)
   - [4. Configurar y arrancar con init.sh](#4-configurar-y-arrancar-con-initsh)
@@ -31,6 +25,7 @@ un log auditable.
 - [El log de decisiones](#el-log-de-decisiones)
 - [Ejecutar en una instancia EC2](#ejecutar-en-una-instancia-ec2)
 - [Tests](#tests)
+- [Capacidades y Mecanismos de Control](#capacidades-y-mecanismos-de-control)
 - [Limitaciones y notas](#limitaciones-y-notas)
 - [Estructura del proyecto](#estructura-del-proyecto)
 
@@ -38,188 +33,164 @@ un log auditable.
 
 ## Resumen
 
-ControllerASG implementa un **bucle de control** (observar → decidir → actuar)
-que se ejecuta periódicamente:
+ControllerASG implementa un **bucle de control cerrado** (*feedback control loop*: observar → decidir → actuar) ejecutado periódicamente:
 
-1. **Observa** el estado real de la flota (instancias EC2 gestionadas y su salud
-   en el Target Group) y sus métricas en CloudWatch.
-2. **Decide** si aumentar, reducir o mantener la capacidad, según umbrales
-   configurables y reglas de seguridad (mínimos, cooldown, calentamiento).
-3. **Actúa** lanzando o retirando una instancia, registrándola/desregistrándola
-   del Target Group, con drenaje de conexiones y *rollback* ante fallos.
+1. **Observa** el estado real de la flota (instancias EC2 gestionadas y su salud en el Target Group) y sus métricas operativas en CloudWatch.
+2. **Decide** si aumentar, reducir o mantener la capacidad, según umbrales configurables y reglas de estabilidad (mínimos de seguridad, enfriamiento y calentamiento de instancias).
+3. **Actúa** aprovisionando o terminando instancias, registrándolas o desregistrándolas del Target Group, asegurando drenaje de conexiones activas y *rollback* ante fallos.
 
-Todo lo que ve, decide y ejecuta se anota como una línea JSON en un log, de modo
-que siempre puedes reconstruir *qué pasó y por qué*.
+Toda observación, decisión y acción ejecutada se anota como un registro JSON en el log de auditoría para permitir trazabilidad completa.
 
 ---
 
 ## Funcionalidades
 
-- **Escalado horizontal automático** de instancias EC2 entre un mínimo y un
-  máximo configurables (1 a 5 por defecto).
+- **Escalado horizontal automático** de instancias EC2 entre un mínimo y un máximo configurables (1 a 5 por defecto).
 - **Múltiples métricas simultáneas** de CloudWatch, combinables:
-  - `RequestCountPerTarget` — demanda (requests por instancia).
-  - `TargetResponseTime` — calidad de servicio (latencia).
-  - `CPUUtilization` — uso de recurso (por instancia, se promedia la flota).
-- **Escalado asimétrico**: sube si *cualquier* métrica supera su umbral (reacción
-  rápida); baja solo si *todas* están por debajo (conservador).
-- **Reglas de seguridad**:
-  - Piso de capacidad garantizado (restablece el mínimo aunque no haya métricas).
-  - *Cooldown* entre acciones para evitar oscilaciones.
-  - No reduce mientras haya instancias todavía inicializándose.
+  - `RequestCountPerTarget` — demanda directa (requests entrantes por instancia).
+  - `TargetResponseTime` — calidad de servicio y SLO (latencia de respuesta).
+  - `CPUUtilization` — uso de cómputo (por instancia, se promedia entre la flota).
+- **Escalado asimétrico y conservador**: sube si *cualquier* métrica supera su umbral (reacción rápida ante sobrecarga); baja solo si *todas* están por debajo de su umbral (protección de disponibilidad).
+- **Reglas de seguridad y estabilidad**:
+  - Piso de capacidad garantizado (restablece el mínimo configurado incluso sin métricas).
+  - *Cooldown* entre acciones para evitar oscilaciones rápidas (*flapping*).
+  - No reduce capacidad mientras haya instancias inicializándose.
 - **Operaciones seguras sobre la infraestructura**:
   - Registro en el Target Group y espera a estado `running` al escalar hacia arriba.
-  - *Rollback* automático (termina la instancia) si no llega a operativa.
-  - Drenaje de conexiones antes de terminar al reducir.
-  - Reparto de instancias entre zonas de disponibilidad (subredes).
+  - *Rollback* automático (termina la instancia) si no llega a estar operativa.
+  - Drenaje de conexiones activas antes de terminar instancias al reducir.
+  - Distribución equilibrada de instancias entre zonas de disponibilidad (subredes).
 - **Auditoría completa**: un `DecisionRecord` en formato JSON Lines por cada ciclo.
 - **Validación de configuración** independiente (`-check`) sin contactar AWS.
+- **Servidor HTTP integrado**: endpoints `/health` y `/status` para supervisión y monitoreo externo.
 - **Apagado limpio** ante `SIGINT`/`SIGTERM` (compatible con systemd y Ctrl+C).
-- **Script interactivo** (`init.sh`) para generar la configuración, compilar,
-  validar y arrancar.
+- **Script interactivo** (`init.sh`) para asistir en la configuración, validación y arranque.
 
 ---
 
 ## Arquitectura
 
-El diseño separa responsabilidades en módulos, con **interfaces** que aíslan la
-lógica de decisión de las llamadas a AWS (lo que la hace fácilmente testeable):
+El diseño desacopla responsabilidades en módulos independientes, comunicados mediante clases bien definidas:
 
 ```
                          ┌───────────────────────────────────────────┐
-                         │                  main                      │
-                         │  arma dependencias, ticker, señales SO     │
+                         │              main.py / CLI                │
+                         │   argumentos, dependencias, ticker, señales │
                          └───────────────────────┬───────────────────┘
                                                  │
-                              ┌──────────────────▼──────────────────┐
-                              │             controller              │
-                              │  Tick(): observar → decidir → actuar│
-                              │  y registra 1 DecisionRecord        │
-                              └──┬───────────┬───────────┬──────────┘
-                                 │           │           │
-              MetricsSource ─────┘           │           └───── Actuator / Fleet
-                    │                        │                        │
-            ┌───────▼────────┐        ┌──────▼──────┐         ┌───────▼────────┐
-            │    observer    │        │    logger   │         │   provisioner  │
-            │  CloudWatch    │        │  JSON Lines │         │  EC2 + ELBv2   │
-            │  GetMetricData │        └─────────────┘         │  run/terminate │
-            └───────┬────────┘                                │  register/     │
-                    │                                         │  deregister    │
-              ┌─────▼─────┐                                   └───────┬────────┘
-              │ CloudWatch│                                      ┌────▼────┐
-              └───────────┘                                      │ EC2/ALB │
-                                                                 └─────────┘
+                               ┌──────────────────▼──────────────────┐
+                               │             controller              │
+                               │  tick(): observar → decidir → actuar│
+                               │  y registra 1 DecisionRecord        │
+                               └──┬───────────┬───────────┬──────────┘
+                                  │           │           │
+              MetricsSource ──────┘           │           └───── Actuator / Fleet
+                    │                         │                        │
+            ┌───────▼────────┐        ┌───────▼──────┐         ┌───────▼────────┐
+            │    observer    │        │    logger    │         │   provisioner  │
+            │  CloudWatch    │        │  JSON Lines  │         │  EC2 + ELBv2   │
+            │  GetMetricData │        └──────────────┘         │  run/terminate │
+            └───────┬────────┘                                 │  register/     │
+                    │                                          │  deregister    │
+              ┌─────▼─────┐                                    └───────┬────────┘
+              │ CloudWatch│                                       ┌────▼────┐
+              └───────────┘                                       │ EC2/ALB │
+                                                                  └─────────┘
 ```
 
-Módulos:
+Módulos principales:
 
-| Paquete         | Responsabilidad |
-|-----------------|-----------------|
-| `main`          | Punto de entrada: parsea flags, arma dependencias, ejecuta el ticker y gestiona señales del sistema. |
-| `configuration` | Carga y **valida** `conf.json`. |
-| `controller`    | Orquesta el ciclo y contiene la **lógica de decisión**. Depende solo de interfaces (`MetricsSource`, `Fleet`, `Actuator`, `Logger`). |
-| `observer`      | Traduce las políticas de métrica a consultas `GetMetricData` de CloudWatch, con paginación y agregación por ventana. |
-| `provisioner`   | Implementa `Fleet` y `Actuator`: lanza/termina instancias EC2 y las registra/desregistra del Target Group (ELBv2). |
-| `logger`        | Escribe un `DecisionRecord` por línea en JSON Lines (thread-safe). |
-| `model`         | Tipos de dominio: `Instance`, `ObservedMetric`, `Decision`, `DecisionRecord`, `Capacity`. |
-| `infra`         | Scripts para crear/destruir la infraestructura de prueba (SG, launch template, target group, ALB). |
+| Módulo | Responsabilidad |
+|--------|-----------------|
+| `controllerasg.main` | Punto de entrada: parsea flags, inicializa clientes de AWS, ejecuta el ticker y gestiona señales del sistema. |
+| `controllerasg.configuration` | Carga, asigna valores por defecto y **valida** estrictamente `conf.json`. |
+| `controllerasg.controller` | Orquesta el ciclo de control y contiene la **lógica de decisión**, cooldown e histéresis. |
+| `controllerasg.observer` | Traduce las políticas de métrica a consultas `GetMetricData` de CloudWatch, con paginación y agregación por ventana. |
+| `controllerasg.provisioner` | Gestiona el ciclo de vida de instancias en EC2 y el registro/drenaje en el Target Group (ELBv2). |
+| `controllerasg.logger` | Escribe los registros `DecisionRecord` por línea en JSON Lines de forma segura para hilos. |
+| `controllerasg.statusserver` | Expone un micro-servidor HTTP con los endpoints `/health` y `/status`. |
+| `controllerasg.model` | Modelos de datos: `Instance`, `ObservedMetric`, `Decision`, `DecisionRecord`, `Capacity`. |
+| `infra` | Scripts para aprovisionar y destruir infraestructura de prueba (VPC, SG, launch template, target group, ALB). |
 
 ---
 
 ## Flujo de ejecución
 
-En cada tick (cada `pollIntervalSeconds`), `controller.Tick()`:
+En cada tick (determinado por `pollIntervalSeconds`), `controller.tick()`:
 
-1. **Lee la flota** con `provisioner.Instances()`: instancias `pending`/`running`
-   con el tag `managed-by=controllerasg` y su salud en el Target Group. Si falla,
-   no actúa (sin saber la capacidad no es seguro decidir).
-2. **Observa las métricas** con `observer.Observe()`. Las métricas sin datapoints
-   se omiten (no se reportan como `0`).
-3. **Decide** (`INCREASE_CAPACITY`, `REDUCE_CAPACITY` o `MAINTAIN_CAPACITY`).
+1. **Lee la flota** con `provisioner.instances()`: instancias en estado `pending`/`running` con el tag `managed-by=controllerasg` y su salud en el Target Group. Si la consulta falla, se aborta la decisión para evitar acciones a ciegas.
+2. **Observa las métricas** con `observer.observe()`. Las métricas sin datapoints se omiten (no se asumen en 0).
+3. **Decide** la acción (`INCREASE_CAPACITY`, `REDUCE_CAPACITY` o `MAINTAIN_CAPACITY`).
 4. **Actúa** si corresponde:
-   - *ScaleUp*: `RunInstances` desde el launch template → espera `running` →
-     `RegisterTargets`. Si algo falla, hace *rollback* (termina la instancia).
-   - *ScaleDown*: elige la víctima → `DeregisterTargets` → espera drenaje →
-     `TerminateInstances`.
-5. **Registra** exactamente un `DecisionRecord`, incluso ante errores.
+   - *ScaleUp*: lanza instancias con `run_instances` usando el Launch Template → espera a estado `running` → registra en el Target Group con `register_targets`. Si algo falla, ejecuta *rollback* (termina la instancia).
+   - *ScaleDown*: selecciona la instancia víctima → desregistra del Target Group con `deregister_targets` → espera a que drene conexiones activas → termina la instancia con `terminate_instances`.
+5. **Registra** exactamente un `DecisionRecord` en el log, documentando observaciones, motivo, acción y resultado.
 
 ---
 
 ## Lógica de decisión
 
-El orden de las reglas (en `controller.decide()`) es deliberado:
+El orden de evaluación en `controller.decide()` garantiza estabilidad y disponibilidad:
 
-1. **Piso de seguridad** — si `capacidad < minInstances`, sube siempre,
-   ignorando métricas y cooldown (cubre arranque en frío o una instancia caída).
-2. **Cooldown** — si la última acción fue hace menos de `cooldownSeconds`, mantiene.
-3. **Sin métricas** — si no llegó ningún dato, mantiene (no se actúa a ciegas).
+1. **Piso de seguridad**: Si `capacidad < minInstances`, sube capacidad inmediatamente, ignorando métricas y cooldown (cubre arranque en frío o pérdida imprevista de instancias).
+2. **Cooldown**: Si la última acción ocurrió hace menos de `cooldownSeconds`, mantiene la capacidad.
+3. **Sin métricas**: Si no se recibieron datos de métricas, mantiene la capacidad.
 4. **Umbrales**:
-   - **Sube** si *alguna* métrica ≥ su `scaleUpThreshold` (y hay margen bajo el máximo).
-   - **Reduce** si *todas* las métricas < su `scaleDownThreshold` (y hay margen sobre el mínimo).
-   - En cualquier otro caso, mantiene.
+   - **Sube** (`INCREASE_CAPACITY`) si *alguna* métrica ≥ su `scaleUpThreshold` (y la flota es menor a `maxInstances`).
+   - **Reduce** (`REDUCE_CAPACITY`) si *todas* las métricas < su `scaleDownThreshold` durante `confirmCyclesDown` ciclos consecutivos (y la flota es mayor a `minInstances`).
+   - En cualquier otro caso, mantiene (`MAINTAIN_CAPACITY`).
 
-Una métrica sin dato **se abstiene**: no fuerza subida ni bloquea la reducción.
-Para métricas de demanda, la ausencia de datapoints suele significar "no hubo
-tráfico", que es justamente señal de que es seguro reducir.
+Una métrica sin datos **se abstiene**: no fuerza escalado hacia arriba ni bloquea la reducción. En métricas de demanda, la ausencia de tráfico indica que es seguro reducir o mantener la capacidad.
 
 ---
 
 ## Tecnologías
 
-- **Go 1.27** (ver `go.mod`).
-- **AWS SDK for Go v2**:
-  - `service/ec2` — lanzar, terminar y describir instancias.
-  - `service/elasticloadbalancingv2` — registrar/desregistrar targets y consultar su salud.
-  - `service/cloudwatch` — `GetMetricData` para observar métricas.
-- **Bash** + **Python 3** — scripts de configuración (`init.sh`) e infraestructura (`infra/`).
-- **AWS CLI** — solo para los scripts de `infra/` (crear/destruir recursos de prueba).
+- **Python 3.10+** (probado y compatible con Python 3.10 a 3.14).
+- **AWS SDK for Python (`boto3`)**:
+  - `ec2` — lanzar, terminar y describir instancias.
+  - `elbv2` — registrar/desregistrar targets y consultar su salud.
+  - `cloudwatch` — consultas agregadas de series de tiempo con `GetMetricData`.
+- **pytest** — suite de pruebas unitarias y de integración.
+- **matplotlib** — generación de gráficas y visualización temporal en `analysis/analyze.py`.
+- **Bash** — scripts auxiliares de configuración e infraestructura en `infra/`.
+- **AWS CLI** — utilizado en los scripts de `infra/` para aprovisionamiento inicial.
 
 ---
 
 ## Requisitos previos
 
-- **Go 1.27+**
-- **python3** (lo usa `init.sh` para leer/escribir `conf.json`)
-- **Credenciales de AWS** configuradas con permisos suficientes (ver abajo)
-- **AWS CLI** — solo si vas a usar los scripts de `infra/`
-- Recursos de AWS ya existentes (o creados con `infra/up.sh`):
+- **Python 3.10 o superior** y gestor de paquetes `pip`.
+- **Credenciales de AWS** configuradas en el entorno (`~/.aws/credentials` o variables de entorno `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`).
+- **AWS CLI** — necesario solo si se usarán los scripts de automatización de `infra/`.
+- Recursos de AWS disponibles (o creados con `infra/up.sh`):
   - un **Launch Template**,
-  - un **Target Group** de un **Application Load Balancer**,
-  - al menos una **subred** (idealmente dos, en zonas distintas).
+  - un **Target Group** asociado a un **Application Load Balancer**,
+  - al menos una **subred** (recomendado dos en zonas de disponibilidad distintas).
 
 ---
 
 ## Instalación
 
-### 1. Instalar herramientas
+### 1. Instalar dependencias
 
-**Go** (Ubuntu/Debian; se recomienda el tarball oficial para tener 1.27+):
+Instalar los paquetes requeridos de Python:
 
 ```bash
-# Opción rápida (puede traer una versión más antigua):
-sudo apt-get update && sudo apt-get install -y golang-go python3 build-essential
+pip install -r requirements.txt
 ```
 
-**AWS CLI** (solo si usarás `infra/`):
+O en un entorno virtual aislado:
 
 ```bash
-sudo apt-get install -y awscli   # o la instalación oficial de AWS CLI v2
-```
-
-Clonar el repositorio:
-
-```bash
-git clone https://github.com/SamuelMarti22/ControllerASG ControllerASG
-cd ControllerASG
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ### 2. Credenciales y permisos de AWS
 
-En tu máquina local, con `aws configure` (perfil por defecto) o variables de
-entorno. En una instancia EC2, lo ideal es un **IAM Instance Role** (ver
-[Ejecutar en una instancia EC2](#ejecutar-en-una-instancia-ec2)).
-
-Permisos mínimos que necesita el controller:
+En local, configurar las credenciales mediante `aws configure`. En una instancia EC2, asignar un **IAM Instance Role** con la siguiente política mínima:
 
 ```json
 {
@@ -243,30 +214,22 @@ Permisos mínimos que necesita el controller:
 }
 ```
 
-> Los scripts de `infra/` requieren además permisos para crear/borrar SG,
-> launch templates, target groups y load balancers.
-
 ### 3. Provisionar la infraestructura de prueba (opcional)
 
-Si aún no tienes launch template + ALB + target group, puedes crearlos con el
-script incluido (levanta un SG con HTTP:80, un launch template con nginx vía
-user-data, un target group y un ALB):
+Si no cuentas con un Launch Template y un ALB con Target Group ya configurados, puedes levantarlos con el script automatizado:
 
 ```bash
 cd infra
-./up.sh          # crea todo y guarda los IDs en infra/state.env
+./up.sh          # crea SG, launch template, target group y ALB
 ```
 
-Puedes personalizar `VPC_ID`, `SUBNETS`, `AMI_ID`, `KEY_NAME`, `INSTANCE_TYPE`
-mediante variables de entorno antes de ejecutarlo.
-
-Para volcar esos IDs a un `conf.json` ya existente:
+Para transferir los identificadores generados a un archivo `conf.json`:
 
 ```bash
-./write-conf.sh  # copia launch template, target group y dimensiones a conf.json
+./write-conf.sh
 ```
 
-Para destruir todo lo creado (y terminar las instancias gestionadas):
+Para desmantelar los recursos al concluir las pruebas:
 
 ```bash
 ./down.sh
@@ -274,16 +237,7 @@ Para destruir todo lo creado (y terminar las instancias gestionadas):
 
 ### 4. Configurar y arrancar con init.sh
 
-`init.sh` es la vía recomendada para el primer arranque. De forma interactiva:
-
-- Pregunta cada valor de `conf.json` (si ya existe, ofrece los actuales como
-  default; **Enter** los conserva).
-- Deriva automáticamente las dimensiones de CloudWatch a partir de los ARN del
-  Target Group y del Load Balancer.
-- Permite activar/desactivar cada métrica y fijar sus umbrales.
-- Compila el binario en `bin/controllerasg`.
-- Valida la configuración con `-check` (sin contactar AWS).
-- Opcionalmente arranca el controller.
+El asistente `init.sh` guía paso a paso la configuración:
 
 ```bash
 ./init.sh
@@ -293,7 +247,7 @@ Para destruir todo lo creado (y terminar las instancias gestionadas):
 
 ## Configuración (conf.json)
 
-El archivo `conf.json` describe toda la operación. Ejemplo:
+El archivo `conf.json` especifica los parámetros del controlador. Ejemplo:
 
 ```json
 {
@@ -313,6 +267,11 @@ El archivo `conf.json` describe toda la operación. Ejemplo:
   "pollIntervalSeconds": 60,
   "observationWindowSeconds": 300,
   "cooldownSeconds": 300,
+  "scaleUpStep": 1,
+  "scaleDownStep": 1,
+  "confirmCyclesDown": 3,
+  "statusPort": 8080,
+  "stateFile": "controller-state.json",
   "metrics": [
     {
       "namespace": "AWS/ApplicationELB",
@@ -338,79 +297,83 @@ El archivo `conf.json` describe toda la operación. Ejemplo:
 }
 ```
 
-Campos principales:
+Parámetros:
 
-| Campo | Descripción |
-|-------|-------------|
+| Parámetro | Descripción |
+|-----------|-------------|
 | `aws.region` | Región de AWS. **Obligatorio.** |
 | `compute.launchTemplateId` | Launch template para crear instancias. **Obligatorio.** |
-| `compute.launchTemplateVersion` | Versión (`$Latest`, `$Default` o un número). |
-| `compute.minInstances` / `maxInstances` | Límites de capacidad. `min ≥ 1`, `max ≤ 5`, `min ≤ max`. |
-| `compute.subnetIds` | Subredes donde repartir instancias (al menos 1). |
-| `compute.securityGroupIds` | SGs; vacío usa los del launch template. |
+| `compute.launchTemplateVersion` | Versión del Launch Template (`$Latest`, `$Default` o número). |
+| `compute.minInstances` / `maxInstances` | Límites de capacidad (`1 ≤ min ≤ max ≤ 5`). |
+| `compute.subnetIds` | Subredes donde balancear instancias (al menos 1). |
+| `compute.securityGroupIds` | Security groups explícitos (vacío usa los del template). |
 | `loadBalancer.targetGroupArn` | Target Group donde registrar instancias. **Obligatorio.** |
 | `loadBalancer.targetPort` | Puerto de la aplicación en las instancias. |
-| `pollIntervalSeconds` | Segundos entre ciclos. `> 0`. |
-| `observationWindowSeconds` | Ventana de observación; `≥ period` de cada métrica. |
-| `cooldownSeconds` | Espera mínima entre acciones. `≥ 0`. |
-| `metrics[]` | Políticas de métrica (al menos 1). |
-| `metrics[].perInstance` | Si `true`, se consulta por instancia (dimensión `InstanceId`) y **no** debe traer `dimensions`. |
-| `metrics[].period` | Múltiplo positivo de 60. |
-| `metrics[].scaling` | `scaleUpThreshold` debe ser **mayor** que `scaleDownThreshold`. |
-| `deployment.useDocker` | Marca informativa de despliegue. |
-
-Reglas de validación (aplicadas por `-check` y al arrancar): región, launch
-template y target group obligatorios; `1 ≤ min ≤ max ≤ 5`; `pollIntervalSeconds > 0`;
-`cooldownSeconds ≥ 0`; al menos una métrica; `period` múltiplo de 60;
-`observationWindowSeconds ≥ period`; `scaleUp > scaleDown`; `perInstance` sin dimensiones.
+| `pollIntervalSeconds` | Segundos entre ciclos de evaluación (`> 0`). |
+| `observationWindowSeconds` | Ventana de observación para CloudWatch (`≥ period` de cada métrica). |
+| `cooldownSeconds` | Tiempo mínimo de espera entre acciones de escalado (`≥ 0`). |
+| `scaleUpStep` / `scaleDownStep` | Cantidad de instancias a añadir o retirar por acción (1 o 2). |
+| `confirmCyclesDown` | Ciclos consecutivos requeridos bajo umbral antes de reducir (`≥ 1`). |
+| `statusPort` | Puerto del servidor HTTP para `/health` y `/status` (0 deshabilita). |
+| `stateFile` | Archivo para persistir el timestamp de cooldown entre reinicios. |
+| `metrics[]` | Políticas de métricas configuradas (al menos 1). |
+| `metrics[].perInstance` | Si es `true`, se consulta por cada instancia y se promedia la flota. |
+| `metrics[].period` | Múltiplo positivo de 60 segundos. |
+| `metrics[].scaling` | Umbrales donde `scaleUpThreshold > scaleDownThreshold`. |
 
 ---
 
 ## Uso
 
-Compilar manualmente:
-
-```bash
-mkdir -p bin
-go build -o bin/controllerasg ./main
-```
-
-Flags disponibles:
-
-| Flag | Default | Descripción |
-|------|---------|-------------|
-| `-config` | `conf.json` | Ruta del archivo de configuración. |
-| `-log` | `decisions.jsonl` | Archivo donde se anota cada decisión (JSON Lines). |
-| `-check` | `false` | Solo carga y valida la configuración; no contacta AWS ni inicia el ciclo. |
-
-Validar la configuración sin tocar AWS:
+### Validar la configuración sin contactar AWS:
 
 ```bash
 ./bin/controllerasg -config conf.json -check
+# o directamente con python:
+python3 main.py -config conf.json -check
 ```
 
-Arrancar el controller (Ctrl+C para detener):
+### Iniciar el controlador:
 
 ```bash
 ./bin/controllerasg -config conf.json -log decisions.jsonl
+# o directamente con python:
+python3 main.py -config conf.json -log decisions.jsonl
+```
+
+### Consultar el estado HTTP:
+
+Si `statusPort` está habilitado (p. ej. 8080):
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/status | jq .
 ```
 
 ---
 
 ## El log de decisiones
 
-Cada ciclo produce una línea JSON en el archivo de log. Ejemplo:
+Cada ciclo evaluado produce una entrada estructurada en formato JSON Lines (`decisions.jsonl`):
 
 ```json
 {
-  "Time": "2026-09-22T16:01:48-05:00",
+  "CycleID": 12,
+  "Time": "2026-09-22T16:01:48.907470-05:00",
   "Decision": "REDUCE_CAPACITY",
-  "Reason": "todas las métricas están por debajo de su umbral de bajada",
+  "Reason": "todas las métricas bajo umbral durante los ciclos de confirmación requeridos",
   "WindowSeconds": 300,
   "Metrics": [
     { "Name": "RequestCountPerTarget", "Value": 0, "timestamp": "2026-09-22T16:00:00-05:00" },
     { "Name": "CPUUtilization", "Value": 0.12, "timestamp": "2026-09-22T16:00:00-05:00" }
   ],
+  "CapacityBefore": {
+    "Total": 2, "Healthy": 2,
+    "Instances": [
+      { "ID": "i-0aad...", "State": "running", "Health": "healthy" },
+      { "ID": "i-0866...", "State": "running", "Health": "healthy" }
+    ]
+  },
   "Capacity": {
     "Total": 2, "Healthy": 2,
     "Instances": [
@@ -418,6 +381,13 @@ Cada ciclo produce una línea JSON en el archivo de log. Ejemplo:
       { "ID": "i-0866...", "State": "running", "Health": "healthy" }
     ]
   },
+  "CapacityAfter": {
+    "Total": 1, "Healthy": 1,
+    "Instances": [
+      { "ID": "i-0aad...", "State": "running", "Health": "healthy" }
+    ]
+  },
+  "ConfirmCycle": 3,
   "InstanceID": "i-0866...",
   "Action": "ScaleDown",
   "Result": "ok",
@@ -425,50 +395,44 @@ Cada ciclo produce una línea JSON en el archivo de log. Ejemplo:
 }
 ```
 
-Permite reconstruir qué se observó, qué se decidió y por qué, qué se pidió a la
-infraestructura y qué resultó. Al ser JSON Lines, se puede procesar con `jq`:
+Para monitorear el log en tiempo real:
 
 ```bash
-tail -f decisions.jsonl | jq '{t: .Time, d: .Decision, r: .Reason}'
+tail -f decisions.jsonl | jq '{t: .Time, d: .Decision, r: .Reason, cap: .CapacityBefore.Total}'
+```
+
+Para generar estadísticas y gráficas visuales:
+
+```bash
+python3 analysis/analyze.py decisions.jsonl
 ```
 
 ---
 
 ## Ejecutar en una instancia EC2
 
-El binario es portable, pero el entorno no viaja con el repo. Para correrlo en
-una EC2:
+Para ejecutar el controlador en una máquina virtual dedicada con **systemd**:
 
-1. **Go y python3** instalados en la instancia (no vienen por defecto).
-2. **IAM Instance Role** con los permisos de arriba (no copies claves; el SDK
-   detecta el rol automáticamente vía metadata).
-3. **`conf.json`** apuntando a recursos que existan en esa cuenta/región.
-4. **La EC2 del controller debe estar FUERA de la flota gestionada** (sin el tag
-   `managed-by=controllerasg`), o el controller podría terminarse a sí mismo en
-   un *ScaleDown*.
-5. **Un solo controller a la vez** por conjunto de recursos: dos instancias
-   apuntando al mismo Target Group y tag tomarían decisiones contradictorias.
-
-Para que sobreviva a cierres de sesión y reinicios, ejecútalo bajo **systemd**
-(el código ya maneja `SIGTERM` limpiamente). Ejemplo de unit:
+1. Crear el archivo de unidad `/etc/systemd/system/controllerasg.service`:
 
 ```ini
-# /etc/systemd/system/controllerasg.service
 [Unit]
-Description=ControllerASG
+Description=ControllerASG Auto-Scaling Controller
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/ControllerASG
-ExecStart=/opt/ControllerASG/bin/controllerasg -config /opt/ControllerASG/conf.json -log /opt/ControllerASG/decisions.jsonl
+ExecStart=/usr/bin/python3 /opt/ControllerASG/main.py -config /opt/ControllerASG/conf.json -log /opt/ControllerASG/decisions.jsonl
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+2. Habilitar e iniciar el servicio:
 
 ```bash
 sudo systemctl daemon-reload
@@ -480,41 +444,52 @@ journalctl -u controllerasg -f
 
 ## Tests
 
+La suite de pruebas automatizadas está construida con **pytest**:
+
 ```bash
-go test ./...              # todos los tests
-go test -count=1 -cover ./...   # sin caché, con cobertura
-go vet ./...               # análisis estático
+# Ejecutar todas las pruebas unitarias:
+pytest
+
+# Con reporte detallado:
+pytest -v
+
+# Pruebas con cobertura:
+pytest --cov=controllerasg tests/
 ```
 
-Los módulos críticos están cubiertos con tests unitarios (usando *mocks* de las
-APIs de AWS mediante las interfaces del proyecto) y hay tests de integración
-adicionales en `observer/` y `provisioner/`.
+Para ejecutar las pruebas de integración contra recursos activos de AWS (opcional):
+
+```bash
+# Integración con CloudWatch:
+TEST_INSTANCE_ID=i-xxxx pytest -m integration tests/test_observer_integration.py
+
+# Integración con EC2 y Target Group:
+CONFIG_PATH=conf.json pytest -m integration -s tests/test_provisioner_integration.py
+```
 
 ---
 
----
-
-## Mejoras implementadas respecto a la versión base
+## Capacidades y Mecanismos de Control
 
 1. **Histéresis temporal para ScaleDown (`confirmCyclesDown`)**: Requiere $N$ ciclos consecutivos con todas las métricas bajo el umbral antes de retirar una instancia, eliminando oscilaciones por variaciones transitorias de carga (*flapping*).
-2. **Pasos de escala configurables (`scaleUpStep` / `scaleDownStep`)**: Permite ajustar cuántas instancias se lanzan o retiran por acción en lugar de limitarse a 1.
-3. **Persistencia del Cooldown (`stateFile`)**: Guarda en disco `lastActionAt` en formato JSON, permitiendo que el estado de enfriamiento sobreviva reinicios del proceso o fallos de servicio.
+2. **Pasos de escala configurables (`scaleUpStep` / `scaleDownStep`)**: Permite ajustar cuántas instancias se lanzan o retiran por acción según la agresividad requerida.
+3. **Persistencia del Cooldown (`stateFile`)**: Guarda en disco `lastActionAt` en formato JSON, permitiendo que el estado de enfriamiento sobreviva a reinicios del proceso o fallos de servicio.
 4. **Endpoint de salud y estado HTTP (`statusPort`)**: Expone un micro-servidor HTTP (`GET /health` y `GET /status`) para chequeos de salud de systemd, load balancers o paneles de observabilidad sin necesidad de parsear archivos de log.
-5. **Auditoría enriquecida**: Los registros en `decisions.jsonl` ahora incluyen `CycleID` secuencial, `ConfirmCycle` acumulado, y `CapacityBefore`/`CapacityAfter` para trazabilidad inmediata.
-6. **Generador de carga para pruebas (`infra/load.sh`)**: Script automatizado de 3 fases (baseline, alta carga y descenso) compatible con `hey` y Apache Bench (`ab`).
-7. **Política IAM mínima (`infra/iam-policy.json`)**: Política de mínimo privilegio con las acciones exactas requeridas por el controller.
-8. **Script de análisis y visualización (`analysis/analyze.py`)**: Analizador de métricas y generador de gráficas de capacidad/decisiones temporales.
-9. **Documentación del Challenge**:
-   - `docs/taxonomy.md`: Clasificación taxonómica completa según Al-Dhuraibi et al. (Requisito Sección 5).
-   - `docs/critical-analysis.md`: Análisis crítico de desempeño, SLO, costos y respuestas a las preguntas de sustentación (Requisito Sección 10.4 y 12).
+5. **Auditoría enriquecida**: Los registros en `decisions.jsonl` incluyen `CycleID` secuencial, `ConfirmCycle` acumulado y `CapacityBefore`/`CapacityAfter` para trazabilidad inmediata.
+6. **Generador de carga para pruebas (`infra/load.sh`)**: Script automatizado multi-fase compatible con Apache Bench (`ab`) y `hey`.
+7. **Política IAM mínima (`infra/iam-policy.json`)**: Política de mínimo privilegio con las acciones exactas requeridas por el controlador.
+8. **Herramienta de análisis y visualización (`analysis/analyze.py`)**: Analizador estadístico y generador de gráficas temporales de capacidad y métricas.
+9. **Documentación técnica y taxonómica**:
+   - `docs/taxonomy.md`: Clasificación taxonómica formal según Al-Dhuraibi et al.
+   - `docs/critical-analysis.md`: Análisis crítico de desempeño, SLO, costos y sustentación.
 
 ---
 
 ## Limitaciones y notas
 
-- **Sin coordinación distribuida entre instancias.** No hay *locking* distribuido (p. ej. DynamoDB o etcd) ni elección de líder: se debe ejecutar un único proceso controller por conjunto de recursos.
-- **La actuación bloquea el ciclo.** Un *ScaleUp* espera hasta 3 min a que la instancia esté en estado `running`; durante ese tiempo no se procesan nuevos ticks en el bucle principal.
-- **Alcance educativo**: Diseñado para flotas pequeñas (mín. 1, máx. 5 instancias) de acuerdo con los límites del Learning Challenge y las cuotas de AWS Academy.
+- **Coordinación centralizada**: No incluye mecanismo de consenso distribuido distribuido (p. ej. DynamoDB o etcd) ni elección de líder: se debe ejecutar una única instancia del controlador por Target Group.
+- **Sincronismo de aprovisionamiento**: Al realizar un *ScaleUp*, el proceso espera hasta que la instancia alcanza estado `running` antes de reanudar el bucle principal.
+- **Rango de flota**: Diseñado para flotas de cómputo elásticas de entre 1 y 5 instancias, acorde a cuotas académicas y de laboratorio.
 
 ---
 
@@ -522,26 +497,39 @@ adicionales en `observer/` y `provisioner/`.
 
 ```
 ControllerASG/
-├── main/            # Punto de entrada (flags, carga AWS, bucle ticker, servidor status)
-├── controller/     # Bucle observar→decidir→actuar, histéresis y persistencia
-├── observer/       # Consulta y agregación de métricas en CloudWatch
-├── provisioner/    # Actuación sobre EC2 y ELBv2 (Fleet + Actuator)
-├── configuration/  # Carga, valores por defecto y validación estricta de conf.json
-├── statusserver/   # Servidor HTTP (/health, /status)
-├── logger/         # Log estructurado de decisiones en JSON Lines
-├── model/          # Tipos de dominio (DecisionRecord, Instance, Metric)
-├── docs/           # Entregables teóricos y de análisis
+├── controllerasg/       # Paquete principal en Python
+│   ├── configuration.py # Carga, valores por defecto y validación de conf.json
+│   ├── controller.py    # Bucle observar→decidir→actuar, histéresis y persistencia
+│   ├── logger.py        # Log estructurado de decisiones en JSON Lines
+│   ├── main.py          # Lógica de arranque, bucle ticker y captura de señales
+│   ├── model.py         # Modelos de dominio (DecisionRecord, Instance, Metric)
+│   ├── observer.py      # Consulta y agregación de métricas en CloudWatch
+│   ├── provisioner.py   # Gestión de ciclo de vida en EC2 y ELBv2
+│   └── statusserver.py  # Servidor HTTP (/health, /status)
+├── tests/               # Suite completa de pruebas unitarias y de integración
+│   ├── test_configuration.py
+│   ├── test_controller.py
+│   ├── test_observer.py
+│   ├── test_provisioner.py
+│   ├── test_statusserver.py
+│   ├── test_observer_integration.py
+│   └── test_provisioner_integration.py
+├── main.py              # Script ejecutable de entrada
+├── bin/
+│   └── controllerasg    # Ejecutable directo CLI (Python)
+├── docs/                # Entregables teóricos y de análisis
 │   ├── taxonomy.md          # Taxonomía según Al-Dhuraibi et al.
-│   └── critical-analysis.md # Análisis crítico, SLO, costos y respuestas a preguntas
-├── infra/          # Scripts para crear/destruir infraestructura y pruebas
+│   └── critical-analysis.md # Análisis crítico, SLO, costos y evaluación
+├── infra/               # Infraestructura como código y pruebas de carga
 │   ├── up.sh                # Provisiona VPC, SG, ALB, TG, Launch Template
 │   ├── down.sh              # Destruye la infraestructura de prueba
-│   ├── load.sh              # Generador de carga de 3 fases (hey / ab)
+│   ├── load.sh              # Generador de carga multi-fase
 │   ├── iam-policy.json      # Política IAM de mínimo privilegio
 │   └── user-data.sh         # Script de arranque de Nginx en instancias
-├── analysis/       # Herramientas de evaluación
+├── analysis/            # Herramientas de evaluación
 │   └── analyze.py           # Análisis estadístico y gráfico de decisions.jsonl
-├── init.sh         # Asistente interactivo: configurar + compilar + validar + arrancar
-├── conf.example.json # Plantilla de configuración documentada
-└── decisions.jsonl # Log auditable de decisiones tomadas (generado en ejecución)
+├── init.sh              # Asistente interactivo: configurar + validar + arrancar
+├── requirements.txt     # Dependencias de Python (boto3, pytest, matplotlib)
+├── conf.example.json    # Plantilla de configuración documentada
+└── decisions.jsonl      # Log auditable de decisiones tomadas (generado en ejecución)
 ```
