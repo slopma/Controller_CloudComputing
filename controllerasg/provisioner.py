@@ -1,12 +1,13 @@
-"""Aprovisionador de infraestructura: gestión del ciclo de vida de instancias EC2 y Target Group."""
+# provisioner: maneja el arranque y apagado de instancias en ec2 y target group
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional, Sequence
 
 from controllerasg.configuration import Config
 from controllerasg.model import Instance
 
+# tag para reconocer las instancias que maneja este controller
 MANAGED_TAG_KEY = "managed-by"
 MANAGED_TAG_VALUE = "controllerasg"
 
@@ -18,8 +19,8 @@ HEALTH_UNUSED = "unused"
 HEALTH_UNHEALTHY = "unhealthy"
 
 
+# busca la subred que tenga menos instancias para repartirlas
 def pick_subnet(subnets: Sequence[str], fleet: Sequence[Instance]) -> str:
-    """Distribuye las instancias entre zonas de disponibilidad seleccionando la subred menos poblada."""
     if not subnets:
         raise ValueError("lista de subredes vacía")
     if not fleet:
@@ -37,8 +38,8 @@ def pick_subnet(subnets: Sequence[str], fleet: Sequence[Instance]) -> str:
     return best
 
 
+# selecciona la victima para scale down (primero las que no esten healthy o la mas nueva)
 def pick_victim(fleet: Sequence[Instance]) -> Instance:
-    """Selecciona la instancia a retirar: primero las no saludables, y ante empate la más reciente."""
     if not fleet:
         raise ValueError("flota vacía")
 
@@ -53,8 +54,8 @@ def pick_victim(fleet: Sequence[Instance]) -> Instance:
     return sorted_fleet[0]
 
 
+# mira si hay alguna instancia prendiendo o calentando
 def warming_up(fleet: Sequence[Instance]) -> str:
-    """Identifica si existe alguna instancia en proceso de arranque o inicialización."""
     for inst in fleet:
         if inst.state == "pending" or inst.health == HEALTH_INITIAL:
             return inst.id
@@ -62,8 +63,6 @@ def warming_up(fleet: Sequence[Instance]) -> str:
 
 
 class Provisioner:
-    """Controlador de recursos EC2 y balanceador ELBv2."""
-
     def __init__(
         self,
         ec2_client: Any,
@@ -80,8 +79,8 @@ class Provisioner:
         self.drain_timeout = drain_timeout
         self.drain_poll = drain_poll
 
+    # lista las instancias que tienen el tag y su salud en el target group
     def instances(self) -> list[Instance]:
-        """Consulta las instancias gestionadas (pending o running) y su estado de salud en el Target Group."""
         fleet: list[Instance] = []
 
         params: dict[str, Any] = {
@@ -124,8 +123,8 @@ class Provisioner:
 
         return fleet
 
+    # consulta la salud en el alb target group
     def target_health(self) -> dict[str, str]:
-        """Obtiene el mapa de salud de los targets registrados en el Target Group."""
         health: dict[str, str] = {}
         try:
             out = self.elb.describe_target_health(
@@ -142,11 +141,8 @@ class Provisioner:
             raise
         return health
 
+    # prende una instancia nueva y la registra
     def scale_up(self) -> str:
-        """Lanza una nueva instancia desde el Launch Template y la registra en el Target Group.
-
-        Aplica rollback automático si la instancia no alcanza running o falla el registro.
-        """
         fleet = self.instances()
         if len(fleet) >= self.config.compute.max_instances:
             raise RuntimeError(
@@ -182,8 +178,10 @@ class Provisioner:
 
         inst_id = instances[0].get("InstanceId", "")
 
+        # esperamos a que este en running
         self._wait_running(inst_id)
 
+        # registramos en el target group
         try:
             self.elb.register_targets(
                 TargetGroupArn=self.config.load_balancer.target_group_arn,
@@ -200,8 +198,8 @@ class Provisioner:
 
         return inst_id
 
+    # espera a que la instancia quede en estado running
     def _wait_running(self, inst_id: str) -> None:
-        """Espera a que la instancia se encuentre en estado running."""
         if hasattr(self.ec2, "get_waiter"):
             try:
                 waiter = self.ec2.get_waiter("instance_running")
@@ -214,11 +212,11 @@ class Provisioner:
                 )
                 return
             except Exception as e:
-                # Si falla o no está soportado en mocks, intentamos polling directo
                 if "la instancia" in str(e):
                     raise
                 pass
 
+        # por si estamos con mocks o falla el waiter
         deadline = time.time() + self.running_timeout
         while time.time() < deadline:
             try:
@@ -234,8 +232,8 @@ class Provisioner:
         self.rollback(inst_id)
         raise RuntimeError(f"la instancia {inst_id} no llegó a running: tiempo de espera agotado")
 
+    # apaga una instancia de forma segura
     def scale_down(self) -> str:
-        """Selecciona una instancia víctima, drena sus conexiones y la termina."""
         fleet = self.instances()
         if len(fleet) <= self.config.compute.min_instances:
             raise RuntimeError(
@@ -250,6 +248,7 @@ class Provisioner:
 
         victim = pick_victim(fleet)
 
+        # desregistramos del target group y esperamos que drene
         if victim.health != HEALTH_UNREGISTERED:
             try:
                 self.elb.deregister_targets(
@@ -266,6 +265,7 @@ class Provisioner:
 
             self.wait_drained(victim.id)
 
+        # terminamos la instancia en ec2
         try:
             self.ec2.terminate_instances(InstanceIds=[victim.id])
         except Exception as e:
@@ -273,8 +273,8 @@ class Provisioner:
 
         return victim.id
 
+    # espera a que drene las conexiones
     def wait_drained(self, inst_id: str) -> None:
-        """Espera a que las conexiones activas terminen de drenarse en el Target Group."""
         deadline = time.time() + self.drain_timeout
         while time.time() < deadline:
             try:
@@ -285,8 +285,8 @@ class Provisioner:
                 return
             time.sleep(self.drain_poll)
 
+    # si falla algo al crear la maquina, la apagamos de una
     def rollback(self, inst_id: str) -> None:
-        """Termina una instancia que no pudo completar su registro operativo."""
         try:
             self.ec2.terminate_instances(InstanceIds=[inst_id])
         except Exception:

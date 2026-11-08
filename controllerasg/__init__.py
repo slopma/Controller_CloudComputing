@@ -1,4 +1,4 @@
-"""ControllerASG: Controlador de auto-scaling horizontal autónomo para AWS."""
+# paquete controllerasg
 
 from controllerasg.model import (
     Capacity,

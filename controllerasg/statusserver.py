@@ -1,4 +1,4 @@
-"""Servidor HTTP de estado y verificación de salud (/health y /status)."""
+# servidor http basico para health checks y ver el ultimo estado
 
 import json
 import logging
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def make_status_handler(provider: Any):
     class StatusHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
-            # Silenciar logs estándar de acceso HTTP para no ensuciar la salida
+            # no imprimimos cada request para no llenar la consola de basura
             pass
 
         def do_GET(self) -> None:
@@ -47,16 +47,14 @@ def make_status_handler(provider: Any):
 
 
 class StatusServer:
-    """Micro-servidor HTTP que expone el estado operativo del controlador."""
-
     def __init__(self, port: int, provider: Any) -> None:
         self.port = port
         self.provider = provider
         self.server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
+    # arranca el server en un hilo aparte
     def start(self) -> None:
-        """Inicia el servidor en un hilo secundario si port > 0."""
         if self.port <= 0:
             return
 
@@ -71,8 +69,8 @@ class StatusServer:
             f"[statusserver] escuchando en http://0.0.0.0:{self.port} (GET /health, GET /status)"
         )
 
+    # apaga el server de forma limpia
     def stop(self) -> None:
-        """Detiene limpiamente el servidor HTTP."""
         if self.server:
             self.server.shutdown()
             self.server.server_close()

@@ -1,21 +1,21 @@
-"""Modelos de dominio para el controlador de auto-scaling."""
+# modelos de datos para el controller
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
 
+# decisiones que puede tomar el controller
 class Decision(str, Enum):
-    """Decisiones del bucle de control de elasticidad."""
     MAINTAIN = "MAINTAIN_CAPACITY"
     INCREASE = "INCREASE_CAPACITY"
     REDUCE = "REDUCE_CAPACITY"
 
 
+# estado basico de una instancia
 @dataclass
 class InstanceStatus:
-    """Vista de estado y salud de una instancia en la flota."""
     id: str
     state: str
     health: str
@@ -28,9 +28,9 @@ class InstanceStatus:
         }
 
 
+# cuantas instancias hay y cuantas saludables
 @dataclass
 class Capacity:
-    """Capacidad y estado de salud de la flota gestionada."""
     total: int = 0
     healthy: int = 0
     instances: list[InstanceStatus] = field(default_factory=list)
@@ -43,43 +43,41 @@ class Capacity:
         }
 
 
+# metrica que devolvio cloudwatch
 @dataclass
 class ObservedMetric:
-    """Métrica agregada observada en CloudWatch para la ventana actual."""
     name: str
     value: float
     timestamp: datetime
 
     def to_dict(self) -> dict[str, Any]:
-        ts_str = self.timestamp.isoformat()
         return {
             "Name": self.name,
             "Value": self.value,
-            "timestamp": ts_str,
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
+# info de una instancia ec2 en aws
 @dataclass
 class Instance:
-    """Representación de una instancia EC2 gestionada."""
     id: str
     ip: str = ""
     subnet_id: str = ""
-    state: str = ""  # pending, running, shutting-down, terminated, etc.
-    health: str = "unregistered"  # healthy, initial, unhealthy, unregistered, draining
+    state: str = ""  # pending, running, etc
+    health: str = "unregistered"  # healthy, initial, etc
     launch_time: Optional[datetime] = None
     actual_metrics: list[ObservedMetric] = field(default_factory=list)
 
 
 @dataclass
 class GroupInstances:
-    """Agrupación de instancias gestionadas."""
     instances: list[Instance] = field(default_factory=list)
 
 
+# lo que se escribe en el jsonl cada ciclo
 @dataclass
 class DecisionRecord:
-    """Registro auditable de una decisión del controlador por ciclo."""
     cycle_id: int
     time: datetime
     decision: Decision

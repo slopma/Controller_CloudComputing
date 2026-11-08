@@ -1,4 +1,4 @@
-"""Observador de métricas en CloudWatch con soporte para métricas por instancia y agregación."""
+# consulta de metricas en cloudwatch
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -8,6 +8,7 @@ from controllerasg.configuration import MetricPolicy
 from controllerasg.model import Instance, ObservedMetric
 
 
+# estructura simple para guardar los datapoints
 @dataclass
 class Series:
     values: list[float] = field(default_factory=list)
@@ -15,8 +16,6 @@ class Series:
 
 
 class CloudWatchObserver:
-    """Consulta y agrega métricas de CloudWatch para la ventana de observación configurada."""
-
     def __init__(
         self,
         client: Any,
@@ -27,12 +26,8 @@ class CloudWatchObserver:
         self.metrics = list(metrics)
         self.window = window
 
+    # consulta todas las metricas y devuelve la lista con los promedios
     def observe(self, fleet: Sequence[Instance]) -> list[ObservedMetric]:
-        """Consulta todas las métricas en CloudWatch y calcula el promedio ponderado de la ventana.
-
-        Las métricas marcadas como per_instance se consultan por cada instancia de la flota
-        y se promedian entre sí. Si una métrica no registra datapoints en la ventana, se omite.
-        """
         queries, ids = self.build_queries(fleet)
         if not queries:
             return []
@@ -40,15 +35,16 @@ class CloudWatchObserver:
         raw = self.fetch_series(queries)
         return self.aggregate(raw, ids)
 
+    # arma los diccionarios de consulta para GetMetricData
     def build_queries(
         self, fleet: Sequence[Instance]
     ) -> tuple[list[dict[str, Any]], dict[int, list[str]]]:
-        """Construye las especificaciones de consulta GetMetricData para cada política."""
         queries: list[dict[str, Any]] = []
         ids: dict[int, list[str]] = {i: [] for i in range(len(self.metrics))}
 
         for i, m in enumerate(self.metrics):
             if m.per_instance:
+                # si es por instancia, se consulta una por una
                 for inst in fleet:
                     qid = f"m{i}_{inst.id.replace('-', '')}"
                     ids[i].append(qid)
@@ -64,6 +60,7 @@ class CloudWatchObserver:
                     )
                 continue
 
+            # metrica normal con dimensiones fijas
             qid = f"m{i}"
             ids[i].append(qid)
             dimensions = [{"Name": d.name, "Value": d.value} for d in m.dimensions]
@@ -102,8 +99,8 @@ class CloudWatchObserver:
             },
         }
 
+    # hace la llamada a aws y maneja la paginacion si hay muchos datos
     def fetch_series(self, queries: list[dict[str, Any]]) -> dict[str, Series]:
-        """Ejecuta las consultas en CloudWatch (manejando paginación) y agrupa los datapoints."""
         now = datetime.now(timezone.utc)
         start_time = now - self.window
         raw: dict[str, Series] = {}
@@ -143,10 +140,10 @@ class CloudWatchObserver:
 
         return raw
 
+    # saca el promedio de cada metrica en la ventana
     def aggregate(
         self, raw: dict[str, Series], ids: dict[int, list[str]]
     ) -> list[ObservedMetric]:
-        """Calcula el valor consolidado de cada política a partir de las series recibidas."""
         result: list[ObservedMetric] = []
 
         for i, m in enumerate(self.metrics):
@@ -167,6 +164,7 @@ class CloudWatchObserver:
                     if newest is None or s.newest > newest:
                         newest = s.newest
 
+            # si no hay datos, se omite para no inventar ceros
             if n == 0:
                 continue
 

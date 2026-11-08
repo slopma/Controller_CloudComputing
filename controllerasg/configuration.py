@@ -1,4 +1,4 @@
-"""Carga, valores por defecto y validación estricta de la configuración del controlador."""
+# carga y validacion del archivo conf.json
 
 import json
 from dataclasses import dataclass, field
@@ -55,6 +55,7 @@ class DeploymentConfig:
     use_docker: bool = False
 
 
+# clase principal de la configuracion
 @dataclass
 class Config:
     aws: AWSConfig = field(default_factory=AWSConfig)
@@ -75,8 +76,8 @@ class Config:
     metrics: list[MetricPolicy] = field(default_factory=list)
     deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
 
+    # valores por defecto si no vienen especificados
     def defaults(self) -> None:
-        """Aplica valores por defecto a campos numéricos opcionales."""
         if self.scale_up_step <= 0:
             self.scale_up_step = 1
         if self.scale_down_step <= 0:
@@ -84,8 +85,8 @@ class Config:
         if self.confirm_cycles_down <= 0:
             self.confirm_cycles_down = 1
 
+    # validaciones para evitar errores tontos luego
     def validate(self) -> None:
-        """Valida exhaustivamente la consistencia de los parámetros del controlador."""
         if not self.aws.region:
             raise ValueError("aws.region es obligatorio")
         if not self.compute.launch_template_id:
@@ -138,6 +139,7 @@ class Config:
                 )
 
 
+# funcion helper para sacar campos admitiendo camelCase y snake_case
 def _get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
     for k in keys:
         if k in data:
@@ -146,7 +148,6 @@ def _get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def parse_config(data: dict[str, Any]) -> Config:
-    """Construye un objeto Config a partir de un diccionario JSON."""
     aws_data = data.get("aws", {})
     aws_cfg = AWSConfig(
         region=_get(aws_data, "region", default="")
@@ -217,7 +218,7 @@ def parse_config(data: dict[str, Any]) -> Config:
 
 
 def load_config(path: Union[str, Path]) -> Config:
-    """Carga y valida un archivo de configuración en formato JSON."""
+    # abre el archivo json y lo convierte a objeto Config
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)

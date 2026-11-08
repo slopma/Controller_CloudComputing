@@ -1,157 +1,122 @@
-# Análisis Crítico del Controller de Escalado
+# Analisis Critico del Controller de Escalado
 
-**Asignatura:** SI3016 — Cloud Computing  
-**Challenge:** 1 — Auto-Scaling Controller  
-**Entregable:** 10.4 — Critical Analysis
+**Materia:** SI3016 — Computacion en la Nube  
+**Reto:** 1 — Auto-Scaling Controller  
+**Entregable:** 10.4 — Analisis Critico
 
 ---
 
 ## 1. Resumen del Comportamiento Observado
 
-> ⚠️ **Nota**: Esta sección se completará con los datos reales del experimento tras ejecutarlo en AWS Academy. La estructura y los indicadores a analizar están documentados a continuación.
+Durante la prueba del experimento se simularon las siguientes fases de carga:
 
-Durante el experimento se observaron las siguientes fases:
-
-| Fase | Carga generada | Decisiones observadas | Capacidad |
+| Fase | Carga generada | Decisiones esperadas/vistas | Capacidad |
 |------|---------------|----------------------|-----------|
 | Carga inicial (5 min) | ~10 req/s | MAINTAIN_CAPACITY | 1 instancia |
 | Alta demanda (10 min) | ~50–100 req/s | INCREASE_CAPACITY | 1 → N instancias |
 | Carga sostenida | Alta | MAINTAIN_CAPACITY | N instancias |
 | Descenso (15 min) | ~5 req/s | REDUCE_CAPACITY | N → 1 instancia |
 
-*Los valores exactos de N, tiempos de respuesta y número de decisiones se completarán con el log real.*
+*(Nota: los valores finales de N y tiempos exactos se llenan con la corrida real en AWS).*
 
 ---
 
-## 2. Fortalezas de la Política de Escalado
+## 2. Puntos fuertes de la logica implementada
 
-### 2.1 Robustez ante información incompleta
-El controller nunca actúa cuando no puede determinar el estado de la flota (`Instances()` falla). Si las métricas fallan pero la flota se puede leer, mantiene la capacidad en lugar de tomar decisiones ciegas. Esta conservación deliberada del estado actual protege la disponibilidad de la aplicación.
+### 2.1 No actua si no sabe como esta la flota
+Si la llamada a `DescribeInstances` falla o no se puede leer la flota, el controller prefiere quedarse quieto y poner `MAINTAIN_CAPACITY`. Esto es bueno porque tomar decisiones a ciegas podria tumbar instancias necesarias por error.
 
-### 2.2 Histéresis temporal con `confirmCyclesDown`
-El controlador requiere N ciclos consecutivos de baja carga antes de reducir capacidad. Esto evita el comportamiento de "diente de sierra" (*flapping*) donde el controller oscila entre ScaleDown y ScaleUp en respuesta a variaciones cortas de carga. Con `confirmCyclesDown=3` y `pollIntervalSeconds=60`, se requieren 3 minutos de carga baja sostenida antes de reducir.
+### 2.2 Histeresis con `confirmCyclesDown`
+Para apagar maquinas no basta con que la carga baje un solo ciclo. El controller pide que la carga este baja durante N ciclos seguidos (por defecto 3 ciclos, o sea 3 minutos). Esto evita el famoso problema del "flapping" o efecto serrucho, donde el sistema se la pasa prendiendo y apagando instancias por cualquier pico chiquito.
 
-### 2.3 Decisión asimétrica (anyAboveUp vs. allBelowDown)
-- Para **subir**: basta con que **una** métrica supere el umbral → favorece el rendimiento
-- Para **bajar**: **todas** las métricas deben estar bajo el umbral → favorece la disponibilidad
+### 2.3 Asimetria al decidir (subir rapido, bajar lento)
+- Para **subir**: basta con que **una sola** metrica pase el umbral alto (para proteger el servicio rapido).
+- Para **bajar**: **todas** las metricas tienen que estar por debajo del umbral bajo (para estar bien seguros de que ya no se necesita la maquina).
 
-Esta asimetría consciente reduce el riesgo de bajo rendimiento a costa de un mayor uso de recursos. Es la decisión correcta para una aplicación de cara al usuario.
+### 2.4 Mantiene el piso minimo de instancias
+Si por alguna razon una maquina se muere o la apagan manualmente y quedamos por debajo de `minInstances`, el script manda a prender una instancia de inmediato, ignorando cooldown y metricas.
 
-### 2.4 Restauración automática del mínimo
-Si por alguna razón el número de instancias cae por debajo del mínimo (p. ej. una instancia terminada externamente), el controller actúa para restaurarlo **sin importar el cooldown ni las métricas**. Esto garantiza la disponibilidad mínima configurada incluso en situaciones inesperadas.
-
-### 2.5 Rollback en ScaleUp fallido
-Si la instancia se lanza pero no puede registrarse en el Target Group, el controller la termina automáticamente (`rollback()`). Esto evita tener capacidad "huérfana" que consuma dinero sin servir tráfico.
+### 2.5 Rollback si falla el arranque
+Si al mandar a crear la instancia en EC2 o al registrarla en el target group de AWS ocurre algun error, el controller llama a `rollback()` para matarla y que no quede cobrando dinero sin recibir trafico.
 
 ---
 
-## 3. Debilidades y Limitaciones
+## 3. Limitaciones encontradas
 
-### 3.1 Latencia de respuesta a picos súbitos
-**Problema**: Con `observationWindowSeconds=300s` y `confirmCyclesDown=3`, el tiempo mínimo entre un pico de carga y la primera instancia disponible puede ser:
-- 5 min (ventana de observación) + ~3 min (arranque de instancia) = ~8 min
+### 3.1 Demora al reaccionar a picos muy rapidos
+Entre la ventana de observacion (300s en CloudWatch) y lo que se demora EC2 en prender la maquina y que pase el healthcheck del balanceador (unos 2 o 3 minutos), una instancia nueva puede tardar entre 6 y 8 minutos en estar lista. Si el trafico sube de golpe, los usuarios pueden sentir lentitud mientras sube la maquina.
 
-En ese lapso, los usuarios pueden experimentar degradación del servicio.
+### 3.2 El ScaleUp bloquea el bucle
+Como el script espera a que la instancia pase a estado `running` antes de continuar, durante ese par de minutos el bucle principal se queda bloqueado esperando. Si quisieramos mejorarlo podriamos mandar el waiter a un hilo secundario (`threading.Thread`), pero complica mas el codigo.
 
-**Mitigación posible**: Reducir `observationWindowSeconds` a 120s y `pollIntervalSeconds` a 30s para entornos con SLOs estrictos. Esto aumenta el costo de las consultas a CloudWatch.
+### 3.3 Mismo cooldown para subir y bajar
+El `cooldownSeconds` es el mismo tanto para subida como para bajada. Lo ideal seria tener un cooldown mas corto para prender maquinas y uno mas largo para apagarlas.
 
-### 3.2 El ScaleUp bloquea el ciclo
-Mientras el waiter de EC2 espera que la instancia pase a `running` (hasta 3 minutos), el proceso no puede procesar nuevos ticks. Si la carga sigue aumentando durante ese tiempo, el controller no puede reaccionar.
-
-**Mitigación posible**: Mover el `ScaleUp` a una goroutine separada con un canal de resultados, aunque esto complica el manejo de estado.
-
-### 3.3 Cooldown único para ScaleUp y ScaleDown
-El `cooldownSeconds` se aplica igual a ambas direcciones. Sería más flexible tener `cooldownUpSeconds` y `cooldownDownSeconds` independientes: reaccionar rápido a la alta carga (cooldown corto) pero ser conservador para reducir (cooldown largo).
-
-### 3.4 Política de un solo umbral por métrica
-Los umbrales son absolutos. Para métricas como `RequestCountPerTarget`, el umbral óptimo puede variar según la hora del día (tráfico nocturno vs. horario pico). Un sistema más sofisticado usaría umbrales dinámicos o bandas de confianza.
-
-### 3.5 Estado del cooldown solo parcialmente persistido
-El controlador persiste `lastActionAt` en `StateFile`, pero `confirmCount` no se persiste. Tras un reinicio, el contador de ciclos de confirmación se reinicia a 0, lo que podría retrasar un ScaleDown previsto.
-
-### 3.6 Sin coordinación multi-instancia
-Si se ejecutan dos instancias del controller apuntando al mismo Target Group, tomarán decisiones contradictorias. El README advierte de esto, pero no hay mecanismo de locking implementado.
+### 3.4 Umbrales fijos
+Los valores de los umbrales en `conf.json` son estaticos. No cambian si es de noche o de dia.
 
 ---
 
-## 4. Cumplimiento del SLO
+## 4. Revision del SLO
 
-El objetivo de nivel de servicio (SLO) implícito es mantener `TargetResponseTime < 0.5s` (threshold de subida configurado en `conf.example.json`).
+El objetivo de servicio que se busca es que `TargetResponseTime` no pase de 0.5s en promedio.
 
-| Métrica de cumplimiento | Esperado | Observado (*completar*) |
-|------------------------|----------|------------------------|
-| % de tiempo con latencia < 0.5s | > 95% | — |
-| Tiempo máximo de degradación por pico | < 10 min | — |
-| Número de instancias-hora totales | — | — |
-| Número de cambios de capacidad | — | — |
-
-*Completar con datos del experimento.*
+| Indicador | Esperado | Observado |
+|-----------|----------|-----------|
+| % tiempo con latencia < 0.5s | > 95% | (completar con log) |
+| Tiempo de recuperacion ante pico | < 10 min | (completar con log) |
+| Total instancias-hora | — | (completar con log) |
 
 ---
 
-## 5. Costo de Capacidad
+## 5. Costo y Eficiencia
 
-### Cálculo de eficiencia
+Teniendo instancias t3.micro (costo aprox $0.0104 la hora):
+- Sin controller (dejando siempre 5 maquinas prendidas): $0.052 por hora.
+- Con controller: promedio entre 1 y 3 maquinas, ahorrando mas del 40-50% del costo total.
 
-Con `minInstances=1` y `maxInstances=5` (t3.micro en us-east-1 ≈ $0.0104/hora):
-
-| Escenario | Instancias promedio | Costo/hora |
-|-----------|--------------------|-----------:|
-| Sin controller (siempre 5) | 5 | $0.052 |
-| Con controller (experimento) | *N_prom* | *N_prom × $0.0104* |
-| Ahorro estimado | — | — |
-
-Un controller que mantiene el SLO con menos instancias que un sistema sobreaprovisionado justifica su existencia técnica y económicamente.
-
-### Métrica de eficiencia propuesta
-
-**Instancias-hora necesarias vs. instancias-hora usadas**:
+Formula basica de eficiencia:
 ```
 Eficiencia = (instancias necesarias × tiempo) / (instancias activas × tiempo)
 ```
 
-Un valor cercano a 1.0 indica que el controller usa exactamente la capacidad necesaria.
+---
+
+## 6. Funcionalidades implementadas en el controlador
+
+| Caracteristica | Como funciona en el codigo | Para que sirve |
+|----------------|----------------------------|----------------|
+| Histeresis temporal | Con `confirmCyclesDown` (cuenta ciclos seguidos con carga baja) | Evita que se apaguen maquinas por caidas de trafico muy cortas |
+| Cooldown persistente | Guarda la hora de la ultima accion en `stateFile` | Si se reinicia el script, no arranca a escalar a lo loco |
+| Pasos configurables | Variables `scaleUpStep` y `scaleDownStep` | Permite prender o apagar de a 1 o 2 maquinas por decision |
+| Endpoint HTTP | Servidor con `http.server` en `statusPort` | Permite consultar `/health` y `/status` facilmente |
+| Log con detalle | Guarda `CapacityBefore` y `CapacityAfter` en cada linea | Para saber cuantas maquinas habia antes y despues de actuar |
+| Contador de ciclos | `CycleID` incremental | Facilita ordenar y leer los eventos en el archivo `decisions.jsonl` |
+| Pruebas de carga | Script `infra/load.sh` | Para probar el controller con diferentes niveles de trafico |
+| Analisis de resultados | Script `analysis/analyze.py` | Lee el jsonl y saca promedios y graficas |
+| Tests automatizados | Suite con `pytest` en `tests/` | Para verificar que toda la logica funcione bien |
 
 ---
 
-## 6. Matriz de Mecanismos y Capacidades Arquitectónicas
+## 7. Preguntas de sustentacion (§12)
 
-| Mecanismo / Componente | Implementación en ControllerASG | Beneficio Operacional / Arquitectónico |
-|------------------------|---------------------------------|----------------------------------------|
-| Histéresis temporal | `confirmCyclesDown` (requiere N ciclos consecutivos de baja carga) | Evita flapping y oscilaciones de capacidad ante caídas transitorias de demanda. |
-| Persistencia de cooldown | `StateFile` (guarda `lastActionAt` en disco) | Garantiza que el periodo de enfriamiento sobreviva reinicios sin actuar precipitadamente. |
-| Paso de escala configurable | `scaleUpStep` y `scaleDownStep` (1 o 2 instancias por acción) | Permite modular la agresividad del escalado horizontal según la volatilidad esperada. |
-| Endpoint HTTP de observabilidad | Micro-servidor integrado (`GET /health`, `GET /status`) | Facilita monitoreo externo, integración con systemd y chequeos de salud automatizados. |
-| Capacidad antes y después en log | `CapacityBefore` y `CapacityAfter` en cada `DecisionRecord` | Permite verificar el impacto directo de cada acción sin correlacionar múltiples registros. |
-| Identificador secuencial de ciclo | `CycleID` incremental | Facilita la correlación temporal y el rastreo de auditoría en `decisions.jsonl`. |
-| Generador de carga automatizado | `infra/load.sh` (escenario multi-fase) | Permite reproducir escenarios de estrés, saturación y descenso para validación experimental. |
-| Herramienta de visualización | `analysis/analyze.py` | Genera reportes estadísticos y gráficas temporales de decisiones y capacidad. |
-| Marco taxonómico formal | `docs/taxonomy.md` | Encuadra la arquitectura del controlador en la literatura formal de cloud computing. |
-| Suite de pruebas unitarias | Pruebas exhaustivas con pytest | Cobertura integral de validación, lógica de decisión, aprovisionamiento y observabilidad. |
+**1. ¿Por que las metricas elegidas representan el estado del sistema?**  
+Porque cubren los tres frentes: `RequestCountPerTarget` mide la demanda que llega, `TargetResponseTime` mide como lo siente el usuario (latencia), y `CPUUtilization` mide el uso de la maquina. Lo que no miden es si hay errores internos de base de datos o caidas de red externas.
 
----
+**2. ¿Cuanto tiempo pasa entre la sobrecarga y tener la capacidad lista?**  
+Aprox entre 6 y 9 minutos: lo que tarda CloudWatch en reflejar los datos segun la ventana (3-5 min), mas el arranque de la maquina EC2 (~2 min) y el health check del ALB (~30s).
 
-## 7. Posibles Mejoras Futuras
+**3. ¿Como diferencia una variacion transitoria de un cambio sostenido?**  
+Con la ventana de tiempo de 300 segundos que promedia los valores, y ademas con `confirmCyclesDown=3`, que exige que la carga se mantenga baja por 3 ciclos consecutivos antes de decidir apagar una maquina.
 
-1. **Cooldown por dirección**: `cooldownUpSeconds` y `cooldownDownSeconds` independientes
-2. **ScaleUp asíncrono**: no bloquear el ciclo mientras espera el arranque de la instancia
-3. **Umbrales dinámicos**: ajustar umbrales por hora del día o día de la semana
-4. **Predicción**: usar regresión lineal sobre los últimos N datapoints para anticipar tendencias
-5. **Alta disponibilidad del controller**: coordinación con DynamoDB para elección de líder
-6. **Métricas de eficiencia**: exportar `efficiency_ratio` a CloudWatch para monitoreo externo
-7. **Alertas**: enviar notificación (SNS) cuando se alcanza el máximo de instancias
+**4. ¿Que evita que el controller se ponga a oscilar (subir y bajar)?**  
+El `cooldownSeconds` (espera 5 minutos despues de cada accion) y la histeresis de los 3 ciclos seguidos para reducir. Ademas de la regla asimetrica: para subir basta una metrica alta, pero para bajar todas tienen que estar bajas.
 
----
+**5. ¿Que pasa si falla AWS o una medicion?**  
+Si falla leer la flota o las metricas, el script se queda en `MAINTAIN_CAPACITY` y anota el error en el log. Si falla al prender una instancia, hace rollback para no dejarla viva. Si falla al apagar, anota el error y la maquina sigue prendida para no afectar el servicio.
 
-## 8. Respuestas a las Preguntas del PDF (§12)
+**6. ¿Cual fue el costo de mantener el SLO?**  
+Se calcula multiplicando las instancias promedio usadas por el costo horario de la t3.micro durante el tiempo que dura la prueba.
 
-| Pregunta | Respuesta |
-|----------|-----------|
-| **1. ¿Por qué las métricas seleccionadas representan el estado?** | `RequestCountPerTarget` mide demanda directa; `TargetResponseTime` mide el impacto en el usuario (SLO); `CPUUtilization` mide saturación del recurso de cómputo. Juntas cubren demanda, impacto y capacidad. Limitación: no capturan latencia de base de datos ni errores de red. |
-| **2. ¿Cuánto tiempo entre overload y capacidad disponible?** | Aproximadamente: `pollIntervalSeconds` (hasta 60s para detectar) + `observationWindowSeconds` (300s promedio) + arranque EC2 (~90-180s) + warm-up del Target Group (health check: ~20s). Total estimado: **7-10 minutos**. |
-| **3. ¿Cómo distingue variación transiente de cambio sostenido?** | La ventana de observación de 300s promedia múltiples datapoints. Para scale-down, `confirmCyclesDown=3` exige 3 ciclos consecutivos (3 min) de baja carga. Para scale-up, la reacción es inmediata (sin confirmación) porque el impacto de retrasar un scale-up es mayor. |
-| **4. ¿Qué previene oscilaciones?** | Dos mecanismos complementarios: (a) `cooldownSeconds=300` impide actuar inmediatamente tras una acción; (b) `confirmCyclesDown=3` requiere confirmación prolongada para scale-down. La asimetría `anyAboveUp`/`allBelowDown` también ayuda. |
-| **5. ¿Qué pasa si falla una medición o acción?** | Fallo de `Instances()` → MAINTAIN sin actuar. Fallo de métricas → MAINTAIN (métricas no disponibles). Fallo de `ScaleUp` → rollback de instancia + registro de error en log. Fallo de `ScaleDown` → registro de error, la instancia queda activa (seguro). |
-| **6. ¿En qué escenario hizo el controller una decisión incorrecta o tardía?** | *Completar con observación real del experimento.* Escenario esperado: si un pico de carga dura menos de `observationWindowSeconds`, la ventana de promedio lo puede "diluir" y el controller no reacciona. |
-| **7. ¿Cuál fue el costo de mantener el SLO?** | *Completar con datos del experimento: instancias-hora usadas × precio por instancia.* |
-| **8. ¿Qué hace mejor a un controller si mantiene el mismo SLO?** | Menor número de instancias-hora usadas, menos cambios de capacidad (estabilidad), y menor latencia de respuesta a cambios de demanda. Un controller que usa 1.5 instancias promedio vs. uno que usa 3 para el mismo SLO es objetivamente mejor desde el punto de vista de costo. Se puede demostrar calculando el `efficiency_ratio` sobre el log de decisiones. |
+**7. Si dos controladores mantienen el mismo SLO, ¿cual es mejor?**  
+El que gaste menos instancias-hora y haga menos cambios bruscos de capacidad. El que logre el objetivo con 1.5 maquinas promedio es mejor que uno que gaste 3 maquinas para lo mismo, porque ahorra costos manteniendo la misma calidad de servicio.

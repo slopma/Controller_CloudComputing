@@ -1,4 +1,4 @@
-"""Punto de entrada principal para el Auto-Scaling Controller."""
+# punto de entrada principal para correr el auto-scaling controller
 
 import argparse
 import logging
@@ -26,30 +26,31 @@ logging.basicConfig(
 logger = logging.getLogger("controllerasg")
 
 
+# parseo de flags de linea de comandos
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="ControllerASG: Controlador de Auto-Scaling Autónomo para AWS"
+        description="ControllerASG: Auto-Scaling Controller para AWS"
     )
     parser.add_argument(
         "-config",
         "--config",
         dest="config",
         default="conf.json",
-        help="Ruta del archivo de configuración JSON (por defecto conf.json)",
+        help="ruta del archivo conf.json (default: conf.json)",
     )
     parser.add_argument(
         "-log",
         "--log",
         dest="log",
         default="decisions.jsonl",
-        help="Archivo donde se anota cada decisión en JSON Lines (por defecto decisions.jsonl)",
+        help="archivo jsonl donde se guardan las decisiones",
     )
     parser.add_argument(
         "-check",
         "--check",
         dest="check",
         action="store_true",
-        help="Solo carga y valida la configuración, no contacta AWS ni inicia el ciclo",
+        help="solo valida la configuracion y sale sin llamar a aws",
     )
     return parser.parse_args()
 
@@ -57,12 +58,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # cargamos la configuracion
     try:
         config = load_config(args.config)
     except Exception as e:
         logger.error(f"No se pudo cargar la configuración: {e}")
         sys.exit(1)
 
+    # si solo era para validar (-check) salimos de una
     if args.check:
         logger.info(f"configuración válida: {args.config}")
         logger.info(
@@ -73,6 +76,7 @@ def main() -> None:
         )
         return
 
+    # abrimos el archivo de log para append
     try:
         log_file = open(args.log, "a", encoding="utf-8")
     except Exception as e:
@@ -81,13 +85,15 @@ def main() -> None:
 
     stop_event = threading.Event()
 
+    # para capturar ctrl+c y apagar bien
     def handle_signal(sig: int, frame: object) -> None:
-        logger.info("señal recibida, deteniendo el controller limpiamente...")
+        logger.info("señal recibida, deteniendo el controller...")
         stop_event.set()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    # conectamos con los clientes de aws
     try:
         session = boto3.Session(region_name=config.aws.region)
         cw_client = session.client("cloudwatch")
@@ -118,9 +124,10 @@ def main() -> None:
     if config.state_file:
         logger.info(f"persistencia de cooldown en {config.state_file}")
 
-    # Ejecutar el primer tick inmediatamente sin esperar el primer intervalo
+    # primer tick inmediato sin esperar al timer
     ctl.tick()
 
+    # bucle que corre cada poll_interval_seconds
     while not stop_event.is_set():
         if stop_event.wait(timeout=float(config.poll_interval_seconds)):
             break

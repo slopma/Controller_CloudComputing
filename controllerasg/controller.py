@@ -1,4 +1,4 @@
-"""Bucle cerrado de control: observar -> decidir -> actuar."""
+# logica del controlador de escalado
 
 import json
 import logging
@@ -20,8 +20,8 @@ from controllerasg.model import (
 logger = logging.getLogger(__name__)
 
 
+# funcion para armar el resumen de capacidad
 def summarize(fleet: Sequence[Instance]) -> Capacity:
-    """Genera el resumen de capacidad y salud de la flota actual."""
     total = len(fleet)
     healthy = sum(1 for i in fleet if i.health == "healthy")
     instances = [
@@ -32,8 +32,6 @@ def summarize(fleet: Sequence[Instance]) -> Capacity:
 
 
 class Controller:
-    """Orquestador del bucle cerrado de auto-scaling con histéresis temporal y persistencia."""
-
     def __init__(
         self,
         config: Config,
@@ -56,16 +54,17 @@ class Controller:
         self._last_record: Optional[DecisionRecord] = None
         self._last_record_lock = threading.Lock()
 
+        # si habia un estado guardado lo cargamos
         self.load_state()
 
+    # propiedad para que el servidor http pueda consultar el ultimo registro
     @property
     def last_record(self) -> Optional[DecisionRecord]:
-        """Devuelve el último registro generado (para inspección vía /status HTTP)."""
         with self._last_record_lock:
             return self._last_record
 
+    # un ciclo completo de observacion y decision
     def tick(self) -> None:
-        """Ejecuta un ciclo completo: observar -> decidir -> actuar y registra exactamente un DecisionRecord."""
         with self._lock:
             self.cycle_id += 1
             cycle_id = self.cycle_id
@@ -85,7 +84,7 @@ class Controller:
         )
 
         try:
-            # --- 1. Observar flota ---
+            # 1. Mirar como esta la flota
             try:
                 fleet = self.fleet.instances()
             except Exception as e:
@@ -97,7 +96,7 @@ class Controller:
             rec.capacity = cap
             rec.capacity_before = cap
 
-            # --- 2. Observar métricas ---
+            # 2. Consultar las metricas en cloudwatch
             observed: list[ObservedMetric] = []
             obs_err: Optional[Exception] = None
             try:
@@ -107,7 +106,7 @@ class Controller:
                 rec.error = f"observación: {e}"
             rec.metrics = observed
 
-            # --- 3. Decidir ---
+            # 3. Tomar la decision
             with self._lock:
                 decision, reason, confirm_cycle = self.decide(observed, len(fleet))
                 rec.confirm_cycle = confirm_cycle
@@ -117,7 +116,7 @@ class Controller:
             if obs_err is not None and rec.decision == Decision.MAINTAIN:
                 rec.reason = "métricas no disponibles, no se actúa"
 
-            # --- 4. Actuar ---
+            # 4. Ejecutar la accion si toca
             action_err: Optional[Exception] = None
             if rec.decision == Decision.INCREASE:
                 rec.action = "ScaleUp"
@@ -148,11 +147,12 @@ class Controller:
 
             rec.result = "ok"
 
+            # guardamos el timestamp de la accion para el cooldown
             with self._lock:
                 self.last_action_at = datetime.now(timezone.utc).astimezone()
             self.save_state()
 
-            # Leer la flota posterior a la acción para reflejarla en la auditoría
+            # volvemos a leer la flota para registrar como quedo despues del cambio
             try:
                 after_fleet = self.fleet.instances()
                 rec.capacity_after = summarize(after_fleet)
@@ -160,27 +160,28 @@ class Controller:
                 logger.warning(f"[controller] aviso: no se pudo leer la flota post-acción: {e}")
 
         finally:
+            # siempre guardamos el log, pase lo que pase
             self.logger.log(rec)
             with self._last_record_lock:
                 self._last_record = rec
 
+    # aca esta la logica de si se sube, baja o mantiene
     def decide(
         self, observed: Sequence[ObservedMetric], current_count: int
     ) -> tuple[Decision, str, int]:
-        """Implementa la política asimétrica de escalado con histéresis temporal."""
-        # 1. Regla de seguridad prioritaria: restaurar el mínimo sin importar métricas ni cooldown
+        # regla 1: si hay menos instancias que el minimo, subir de una
         if current_count < self.config.compute.min_instances:
             self.confirm_count = 0
             return Decision.INCREASE, "capacidad por debajo del mínimo configurado", 0
 
-        # 2. Cooldown: no actuar si la última acción fue reciente
+        # regla 2: si esta en cooldown no hacemos nada para no oscilar
         if self.last_action_at is not None:
             now = datetime.now(timezone.utc).astimezone()
             elapsed = (now - self.last_action_at).total_seconds()
             if elapsed < self.config.cooldown_seconds:
                 return Decision.MAINTAIN, "en cooldown", self.confirm_count
 
-        # 3. Sin métricas disponibles: mantener siempre
+        # regla 3: si no hay metricas mantenemos
         if not observed:
             self.confirm_count = 0
             return Decision.MAINTAIN, "sin datos de métricas, no se actúa", 0
@@ -192,7 +193,6 @@ class Controller:
 
         for policy in self.config.metrics:
             if policy.metric_name not in values:
-                # Una métrica sin datos se abstiene: no fuerza el escalado hacia arriba ni bloquea la reducción
                 continue
             v = values[policy.metric_name]
             if v >= policy.scaling.scale_up_threshold:
@@ -200,10 +200,12 @@ class Controller:
             if v > policy.scaling.scale_down_threshold:
                 all_below_down = False
 
+        # con que una metrica este alta ya subimos (si hay espacio bajo el maximo)
         if any_above_up and current_count < self.config.compute.max_instances:
             self.confirm_count = 0
             return Decision.INCREASE, "al menos una métrica superó su umbral de subida", 0
 
+        # para bajar exigimos que todas esten bajas por N ciclos seguidos
         if all_below_down and current_count > self.config.compute.min_instances:
             self.confirm_count += 1
             if self.confirm_count >= self.config.confirm_cycles_down:
@@ -226,8 +228,8 @@ class Controller:
             0,
         )
 
+    # lee el archivo de estado para recuperar el cooldown si se reinicia
     def load_state(self) -> None:
-        """Restaura el instante de la última acción desde el archivo de estado en disco si existe."""
         if not self.config.state_file:
             return
         path = Path(self.config.state_file)
@@ -246,8 +248,8 @@ class Controller:
                 f"[controller] aviso: no se pudo leer el estado persistido ({path}): {e}"
             )
 
+    # guarda en el json la fecha de la ultima accion
     def save_state(self) -> None:
-        """Persiste el instante de la última acción al archivo de estado."""
         if not self.config.state_file or self.last_action_at is None:
             return
         path = Path(self.config.state_file)
