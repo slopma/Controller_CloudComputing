@@ -61,26 +61,9 @@ Para evitar inestabilidad y garantizar la disponibilidad del servicio, la polít
 
 ---
 
-## 2. Clasificación según la Taxonomía de Elasticidad (§5)
+## 2. Implementación Reproducible (§10.2)
 
-Siguiendo el marco conceptual de Al-Dhuraibi et al. (2018), clasificamos nuestra solución en cada dimensión relevante:
-
-| Dimensión | Clasificación | Justificación y Criterio de Diseño | ¿Impuesta o Propia? |
-|---|---|---|---|
-| **Tipo de Elasticidad** | Horizontal (*Scale-Out / Scale-In*) | Se agregan o retiran instancias EC2 completas (`t3.micro`). No se modifica la memoria o CPU de una máquina en caliente (vertical) para no introducir paradas de servicio. | Impuesta por el enunciado (§6 y §7). |
-| **Dirección** | Bidireccional | El sistema soporta escalado positivo (`INCREASE_CAPACITY`) y negativo (`REDUCE_CAPACITY`), además de estabilidad (`MAINTAIN_CAPACITY`). | Impuesta por el enunciado. |
-| **Recurso Escalado** | Cómputo (Máquinas Virtuales) | Cada unidad añade 2 vCPUs compartidas y 1 GiB de memoria bajo arquitectura x86_64. El almacenamiento es efímero y la aplicación es stateless. | Impuesta por el enunciado (límite 1 a 5 instancias). |
-| **Alcance (*Scope*)** | Aplicación única, Multi-AZ Regional | Gestiona un único grupo de instancias web bajo un mismo Target Group, pero distribuye las instancias en múltiples subredes/AZs (`us-east-1a`, `us-east-1b`) para alta disponibilidad. | Decisión de diseño propia. |
-| **Propósito** | Optimización dual: Rendimiento y Costo | Mantiene el SLO de latencia ($< 0.5$ s) y minimiza el desperdicio liberando instancias cuando la demanda cesa. | Decisión de diseño propia. |
-| **Modo de Operación** | Reactivo basado en umbrales | Actúa frente al estado observado del sistema, no predice tráfico futuro. Utiliza promedios en ventanas deslizantes para atenuar ruido. | Decisión de diseño propia (justificada por explicabilidad y simplicidad). |
-| **Método de Decisión** | Basado en reglas (*Rule-based*) determinista | La lógica es determinista, auditable y trazable en el log; cualquier decisión es justificable numéricamente a partir de los datos de entrada. | Decisión de diseño propia. |
-| **Arquitectura de Control** | Bucle cerrado centralizado | Un solo proceso supervisor ejecuta el ciclo continuo de control con separación en tres capas (Observer, Controller, Provisioner). | Decisión de diseño propia. |
-
----
-
-## 3. Implementación Reproducible (§10.2)
-
-### 3.1 Estructura del Repositorio
+### 2.1 Estructura del Repositorio
 ```
 Controller_CloudComputing/
 ├── analysis/
@@ -115,7 +98,7 @@ Controller_CloudComputing/
 └── requirements.txt            # Dependencias Python (boto3, pytest, matplotlib)
 ```
 
-### 3.2 Instrucciones de Despliegue y Ejecución
+### 2.2 Instrucciones de Despliegue y Ejecución
 1. **Configurar credenciales**:
    ```bash
    aws configure
@@ -144,9 +127,9 @@ Controller_CloudComputing/
 
 ---
 
-## 4. Evidencia Experimental y Métricas (§10.3)
+## 3. Evidencia Experimental y Métricas (§10.3)
 
-### 4.1 Escenario de Carga
+### 3.1 Escenario de Carga
 Para evaluar el comportamiento dinámico del controlador, se ejecutó una prueba de carga escalonada usando `infra/load.sh` apuntando al DNS del ALB:
 
 | Fase | Duración | Carga Generada | Objetivo Operacional | Decisión Esperada |
@@ -156,7 +139,7 @@ Para evaluar el comportamiento dinámico del controlador, se ejecutó una prueba
 | **Fase 2b: Carga Sostenida** | 5 min | 100 req/s | Probar absorción de tráfico distribuido en la flota | `MAINTAIN_CAPACITY` en cooldown |
 | **Fase 3: Descenso de Carga** | 15 min | ~5 req/s | Retirar capacidad ociosa tras confirmar baja demanda | `REDUCE_CAPACITY` (2 → 1 instancia) |
 
-### 4.2 Métricas Observadas en la Corrida
+### 3.2 Métricas Observadas en la Corrida
 A continuación se presentan los registros representativos extraídos de `decisions.jsonl`:
 
 ```json
@@ -167,7 +150,7 @@ A continuación se presentan los registros representativos extraídos de `decisi
 {"CycleID": 15, "Time": "2026-11-16T20:56:56-05:00", "Decision": "REDUCE_CAPACITY", "Reason": "todas las métricas están por debajo de su umbral de bajada (confirmado por 3 ciclos)", "CapacityBefore": {"Total": 2, "Healthy": 2}, "Action": "ScaleDown", "Result": "ok", "InstanceID": "i-07c41a29bd8e2910f", "CapacityAfter": {"Total": 1, "Healthy": 1}}
 ```
 
-### 4.3 Comportamiento Estadístico del Log y Gráficas de Evidencia
+### 3.3 Comportamiento Estadístico del Log y Gráficas de Evidencia
 Procesando los 96 ciclos de la corrida experimental completa con `analysis/analyze.py`:
 - **Ciclos totales ejecutados**: 96 ciclos (~100 minutos continuos de observación en vivo en AWS).
 - **Decisiones**: 
@@ -194,7 +177,7 @@ Procesando los 96 ciclos de la corrida experimental completa con `analysis/analy
 
 ---
 
-## 5. Evidencias de un ciclo completo
+## 4. Evidencias de un ciclo completo
 -  <img width="500" height="125" alt="image" src="https://github.com/user-attachments/assets/b0b5780a-4a6e-462e-a599-97104726e99d" />
 -  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/6e0eb2bd-35fb-496c-9c51-87f67df61792" />
 -  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/5998544d-0e8f-4ca6-82a9-926d6c91da01" />
@@ -207,7 +190,7 @@ Procesando los 96 ciclos de la corrida experimental completa con `analysis/analy
 
 
 
-## 6. Respuestas a las Preguntas de Sustentación (§12)
+## 5. Respuestas a las Preguntas de Sustentación (§12)
 
 **1. ¿Por qué las métricas elegidas representan adecuadamente el estado del sistema?**  
 Porque abarcan las tres dimensiones fundamentales del servicio: demanda entrante (`RequestCountPerTarget`), experiencia de usuario (`TargetResponseTime` o latencia) y saturación de hardware (`CPUUtilization`). Si una aplicación se traba por CPU, la métrica de cómputo avisa; si la aplicación sufre cuellos de botella en I/O o red sin consumir CPU, la latencia y la acumulación de peticiones lo delatan de inmediato.
