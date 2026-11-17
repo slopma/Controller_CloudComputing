@@ -184,14 +184,27 @@ A continuación se presentan los registros representativos extraídos de `decisi
 {"CycleID": 15, "Time": "2026-11-16T20:56:56-05:00", "Decision": "REDUCE_CAPACITY", "Reason": "todas las métricas están por debajo de su umbral de bajada (confirmado por 3 ciclos)", "CapacityBefore": {"Total": 2, "Healthy": 2}, "Action": "ScaleDown", "Result": "ok", "InstanceID": "i-07c41a29bd8e2910f", "CapacityAfter": {"Total": 1, "Healthy": 1}}
 ```
 
-### 4.3 Comportamiento Estadístico del Log
-Procesando los registros con `analysis/analyze.py`:
-- **Ciclos totales ejecutados**: 35 ciclos (~35 minutos).
+### 4.3 Comportamiento Estadístico del Log y Gráficas de Evidencia
+Procesando los 96 ciclos de la corrida experimental completa con `analysis/analyze.py`:
+- **Ciclos totales ejecutados**: 96 ciclos (~100 minutos continuos de observación en vivo en AWS).
 - **Decisiones**: 
-  - `MAINTAIN_CAPACITY`: 32 ciclos (91.4%) — el sistema permanece estable la mayor parte del tiempo.
-  - `INCREASE_CAPACITY`: 2 ciclos (5.7%) — arranque inicial e incremento por ráfaga.
-  - `REDUCE_CAPACITY`: 1 ciclo (2.9%) — desescalado ordenado tras cesar la carga.
-- **Acciones fallidas / Errores de API**: 0 ciclos.
+  - `MAINTAIN_CAPACITY`: 85 ciclos (88.5%) — estabilidad y cooldown.
+  - `INCREASE_CAPACITY`: 7 decisiones de subida (7.3%) — escalando la flota hasta el tope de 5 instancias.
+  - `REDUCE_CAPACITY`: 4 decisiones de bajada (4.2%) — desescalando ordenadamente tras el cese de tráfico.
+- **Acciones fallidas / Errores de API de AWS**: 0 ciclos (100% de confiabilidad operacional).
+
+#### Gráficas de Evidencia Generadas:
+1. **Tráfico y Latencia en CloudWatch (`docs/cloudwatch_alb_metrics.png`)**:
+   Muestra el pico de más de 4.076 peticiones por minuto y la latencia promedio del balanceador por debajo de 0.0007 s.
+   ![Métricas ALB](cloudwatch_alb_metrics.png)
+
+2. **Utilización de CPU en CloudWatch (`docs/cloudwatch_cpu_metrics.png`)**:
+   Muestra el uso de CPU de las 5 instancias aprovisionadas en la prueba.
+   ![Métricas CPU](cloudwatch_cpu_metrics.png)
+
+3. **Línea de Tiempo del Controlador (`decisions_analysis.png`)**:
+   Correlaciona la capacidad de la flota (0 → 1 → 5 → 4 → 3) con las métricas y las decisiones tomadas ciclo a ciclo.
+   ![Análisis de Decisiones](../decisions_analysis.png)
 
 ---
 
