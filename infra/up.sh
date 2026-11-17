@@ -5,10 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export AWS_REGION="${AWS_REGION:-us-east-1}" AWS_PAGER=""
 
-VPC_ID="${VPC_ID:-vpc-00bfffe8086d5270b}"
-SUBNETS=(${SUBNETS:-subnet-0e03b12aeb15db9d8 subnet-03b60378a8f640ee3}) # 2 zonas distintas
-AMI_ID="${AMI_ID:-ami-0b6d9d3d33ba97d99}"                              # Ubuntu 26.04
-KEY_NAME="${KEY_NAME:-PcJamu}"
+VPC_ID="${VPC_ID:-vpc-00a3b29f564483771}"
+SUBNETS=(${SUBNETS:-subnet-0a97fb626293bc296 subnet-066e18486b5b33a9c}) # 2 zonas distintas (us-east-1a, us-east-1b)
+AMI_ID="${AMI_ID:-ami-05221e3867c5db247}"                              # Ubuntu 22.04 LTS en us-east-1
+KEY_NAME="${KEY_NAME:-vockey}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-t3.micro}"
 
 [ -f state.env ] && { echo "state.env ya existe: ejecuta ./down.sh primero"; exit 1; }
@@ -50,6 +50,7 @@ LT_ID=$LT_ID
 TG_ARN=$TG_ARN
 LB_ARN=$LB_ARN
 LB_DNS=$LB_DNS
+SUBNETS="${SUBNETS[*]}"
 # dimensiones de CloudWatch (sufijos de los ARN)
 TG_DIM=${TG_ARN##*:}
 LB_DIM=${LB_ARN##*:loadbalancer/}

@@ -64,7 +64,7 @@ send_load() {
     else
         # ab no soporta rate limiting directo; usamos -n grande y -t para duración
         local total=$(( rps * duration ))
-        ab -n "$total" -c "$concurrency" -t "$duration" "$TARGET_URL" 2>&1 | grep -E "^(Complete|Failed|Requests per|Time per)" || true
+        ab -k -n "$total" -c "$concurrency" -t "$duration" "$TARGET_URL" 2>&1 | grep -E "^(Complete|Failed|Requests per|Time per)" || true
     fi
 
     echo "[$(date '+%H:%M:%S')] ✓ Fase completada"

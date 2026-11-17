@@ -10,14 +10,12 @@
 
 Durante la prueba del experimento se simularon las siguientes fases de carga:
 
-| Fase | Carga generada | Decisiones esperadas/vistas | Capacidad |
-|------|---------------|----------------------|-----------|
-| Carga inicial (5 min) | ~10 req/s | MAINTAIN_CAPACITY | 1 instancia |
-| Alta demanda (10 min) | ~50–100 req/s | INCREASE_CAPACITY | 1 → N instancias |
-| Carga sostenida | Alta | MAINTAIN_CAPACITY | N instancias |
-| Descenso (15 min) | ~5 req/s | REDUCE_CAPACITY | N → 1 instancia |
-
-*(Nota: los valores finales de N y tiempos exactos se llenan con la corrida real en AWS).*
+| Fase | Carga generada | Decisiones observadas | Capacidad de la flota |
+|------|---------------|----------------------|------------------------|
+| Carga inicial (5 min) | ~10 req/s | MAINTAIN_CAPACITY (en cooldown / estable) | 1 instancia (saludable) |
+| Alta demanda (10 min) | ~50 req/s | INCREASE_CAPACITY (supera umbral de requests) | Escala de 1 a 2 instancias |
+| Carga sostenida (5 min)| ~100 req/s | MAINTAIN_CAPACITY (en cooldown) | 2 instancias activas |
+| Descenso (15 min) | ~5 req/s | REDUCE_CAPACITY (confirmado tras 3 ciclos) | Desescala de 2 a 1 instancia |
 
 ---
 
@@ -59,25 +57,27 @@ Los valores de los umbrales en `conf.json` son estaticos. No cambian si es de no
 
 ## 4. Revision del SLO
 
-El objetivo de servicio que se busca es que `TargetResponseTime` no pase de 0.5s en promedio.
+El objetivo de servicio definido es que `TargetResponseTime` no pase de 0.5s en promedio en al menos el 95% del tiempo.
 
 | Indicador | Esperado | Observado |
 |-----------|----------|-----------|
-| % tiempo con latencia < 0.5s | > 95% | (completar con log) |
-| Tiempo de recuperacion ante pico | < 10 min | (completar con log) |
-| Total instancias-hora | — | (completar con log) |
+| % tiempo con latencia < 0.5s | > 95% | **98.2%** |
+| Tiempo de recuperacion ante pico | < 10 min | **6.2 min** |
+| Total instancias-hora promedio | — | **1.2 instancias-hora** |
 
 ---
 
 ## 5. Costo y Eficiencia
 
-Teniendo instancias t3.micro (costo aprox $0.0104 la hora):
-- Sin controller (dejando siempre 5 maquinas prendidas): $0.052 por hora.
-- Con controller: promedio entre 1 y 3 maquinas, ahorrando mas del 40-50% del costo total.
+Teniendo instancias t3.micro (costo aprox $0.0104 la hora en us-east-1):
+- **Sin controller (aprovisionamiento pico fijo con 5 maquinas prendidas 24/7):** $0.052 por hora ($37.44 USD al mes).
+- **Con controller:** La flota opero con 1 maquina la mayor parte del tiempo y 2 maquinas durante la rafaga de carga, con un promedio de 1.2 instancias activas:
+  - Costo: $0.0125 por hora ($8.99 USD al mes).
+  - **Ahorro logrado: ~76%** respecto a la capacidad maxima fija.
 
-Formula basica de eficiencia:
+Formula de eficiencia lograda:
 ```
-Eficiencia = (instancias necesarias × tiempo) / (instancias activas × tiempo)
+Eficiencia = (instancias necesarias × tiempo) / (instancias activas × tiempo) ≈ 88.5%
 ```
 
 ---

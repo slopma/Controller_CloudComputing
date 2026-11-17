@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Vuelca los IDs de infra/state.env en conf.json (launch template, target group y dimensiones de CloudWatch).
+# Vuelca los IDs de infra/state.env en conf.json (launch template, target group, subnets y dimensiones de CloudWatch).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source infra/state.env
-LT_ID="$LT_ID" TG_ARN="$TG_ARN" TG_DIM="$TG_DIM" LB_DIM="$LB_DIM" python3 - <<'PY'
+[ -f conf.json ] || cp conf.example.json conf.json
+LT_ID="$LT_ID" TG_ARN="$TG_ARN" TG_DIM="$TG_DIM" LB_DIM="$LB_DIM" SUBNETS="${SUBNETS:-}" python3 - <<'PY'
 import json, os
 d = json.load(open('conf.json'))
 d['compute']['launchTemplateId'] = os.environ['LT_ID']
+if os.environ.get('SUBNETS'):
+    d['compute']['subnetIds'] = os.environ['SUBNETS'].split()
 d['loadBalancer']['targetGroupArn'] = os.environ['TG_ARN']
 for m in d['metrics']:
     for dim in m.get('dimensions', []):
