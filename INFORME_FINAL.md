@@ -43,18 +43,8 @@ $$\text{Observe} \longrightarrow \text{Analyze} \longrightarrow \text{Decide} \l
                                       +---------------+                   +---------------+
 ```
 
-### 1.2 Componentes del Sistema
-El código está organizado de manera modular en Python dentro del paquete `controllerasg/`:
-1. **`observer.py` (`CloudWatchObserver`)**: Consulta periódicamente CloudWatch usando la API `GetMetricData`. Consolida las métricas especificadas en la ventana de observación (`observationWindowSeconds`), calculando los promedios reales por métrica y por instancia.
-2. **`controller.py` (`Controller`)**: El cerebro del sistema. Evalúa las métricas recibidas contra las reglas de la política, maneja el cooldown, la histéresis temporal (`confirmCyclesDown`) y produce una de tres decisiones deterministas: `MAINTAIN_CAPACITY`, `INCREASE_CAPACITY` o `REDUCE_CAPACITY`.
-3. **`provisioner.py` (`Provisioner`)**: Interactúa con la infraestructura de AWS (EC2 y ELBv2). 
-   - Para subir capacidad: selecciona la subred con menor carga para distribuir balanceadamente entre Zonas de Disponibilidad (AZs), invoca `RunInstances` usando el Launch Template, etiqueta la instancia con `managed-by=controllerasg`, espera con un waiter a que esté en estado `running` y la registra en el Target Group. Incluye lógica de *rollback* automático si el registro falla.
-   - Para bajar capacidad: selecciona la instancia "víctima" (priorizando aquellas no saludables o, en su defecto, la más reciente), la saca del Target Group, espera a que termine el periodo de drenado de conexiones (`draining`) y finalmente la termina en EC2.
-4. **`statusserver.py` (`StatusServer`)**: Expone un servidor HTTP ligero en el puerto configurado (ej. 8080) con endpoints `/health` (liveness check) y `/status` (último ciclo, métricas y decisión en formato JSON).
-5. **`logger.py` (`JSONLLogger`)**: Escribe de forma atómica y append-only cada ciclo en `decisions.jsonl`.
-6. **`configuration.py`**: Carga y valida el archivo `conf.json` asegurando tipos correctos, límites válidos de flota (1 a 5 instancias) y configuración de red.
 
-### 1.3 Política de Control y Reglas de Decisión
+### 1.2 Política de Control y Reglas de Decisión
 Para evitar inestabilidad y garantizar la disponibilidad del servicio, la política de control aplica las siguientes reglas en estricto orden jerárquico:
 
 1. **Garantía de piso mínimo de flota**:  
@@ -68,13 +58,6 @@ Para evitar inestabilidad y garantizar la disponibilidad del servicio, la polít
 5. **Decisión asimétrica de escalado**:
    - **Regla de Escala hacia Arriba (`INCREASE_CAPACITY`)**: Se activa si **al menos una** métrica supera su umbral (`scaleUpThreshold`). Por ejemplo, si la latencia o las peticiones se disparan, se añade capacidad sin esperar a que la CPU también se sature, priorizando el Service Level Objective (SLO).
    - **Regla de Escala hacia Abajo (`REDUCE_CAPACITY`)**: Se activa **únicamente si todas** las métricas están por debajo de su umbral bajo (`scaleDownThreshold`) **y además** esta condición se mantiene durante $N$ ciclos consecutivos (`confirmCyclesDown`, típicamente 3 ciclos = 3 minutos). Esta histéresis temporal elimina por completo el fenómeno de *flapping* (prender y apagar instancias repetidamente ante oscilaciones momentáneas de tráfico).
-
-### 1.4 Permisos IAM y Seguridad
-El principio de mínimo privilegio se cumple mediante una política IAM dedicada (`infra/iam-policy.json`). El controlador solo requiere permisos para:
-- `ec2:DescribeInstances`, `ec2:RunInstances`, `ec2:TerminateInstances`, `ec2:CreateTags` (restringido a las instancias gestionadas).
-- `elasticloadbalancing:DescribeTargetGroups`, `DescribeTargetHealth`, `RegisterTargets`, `DeregisterTargets`.
-- `cloudwatch:GetMetricData`.
-Ninguna credencial de AWS está quemada en el código fuente; se resuelven mediante el SDK oficial (`boto3`) usando el archivo `~/.aws/credentials` o variables de entorno estándar.
 
 ---
 
@@ -208,49 +191,9 @@ Procesando los 96 ciclos de la corrida experimental completa con `analysis/analy
 
 ---
 
-## 5. Análisis Crítico y Evaluación del SLO (§10.4)
+## 5. Evidencias de un ciclo completo
 
-### 5.1 Cumplimiento del Service-Level Objective (SLO)
-El objetivo de nivel de servicio definido para la aplicación es:
-$$\text{SLO}: \quad \text{Latencia promedio por petición } (TargetResponseTime) \le 0.5 \text{ segundos en al menos el } 95\% \text{ del tiempo}.$$
-
-| Indicador de Rendimiento | Meta (SLO) | Resultado Observado | Estado |
-|---|---|---|---|
-| **% tiempo con latencia $\le 0.5$ s** | $\ge 95\%$ | **$98.2\%$** | **Cumplido** |
-| **Latencia media en carga normal** | $< 0.1$ s | $0.0018$ s (~$1.8$ ms) | Excelente |
-| **Latencia pico durante ráfaga (antes de escalar)** | $\le 0.5$ s | $0.3420$ s (~$342$ ms) | Dentro de tolerancia |
-| **Tiempo de recuperación tras pico de demanda** | $< 10$ min | **$6.2$ min** | **Cumplido** |
-| **Tasa de errores HTTP (5xx)** | $0\%$ | $0\%$ | **Cumplido** |
-
-Durante el segundo 120 de la ráfaga, una sola instancia experimentó un aumento momentáneo de latencia hasta los 342 ms. Al detectarse en CloudWatch, el controlador activó `INCREASE_CAPACITY`, provisionó la segunda instancia y, una vez saludable en el Target Group, el tráfico se repartió equitativamente, devolviendo la latencia promedio a menos de 5 ms.
-
-### 5.2 Análisis de Eficiencia y Costos
-Tomando como base instancias EC2 `t3.micro` en la región `us-east-1` (costo de \$0.0104 USD por hora):
-
-1. **Escenario sin controlador (Sobre-aprovisionamiento estático)**:  
-   Mantener la capacidad máxima de 5 instancias prendidas 24/7 para soportar picos:
-   $$\text{Costo horario} = 5 \times \$0.0104 = \$0.0520 \text{ USD/hora} \implies \$37.44 \text{ USD/mes}$$
-2. **Escenario con nuestro controlador**:  
-   La flota operó con 1 instancia durante el 80% del tiempo y con 2 instancias durante el 20% del tiempo de prueba.
-   $$\text{Capacidad promedio} = (1 \times 0.80) + (2 \times 0.20) = 1.2 \text{ instancias}$$
-   $$\text{Costo horario equivalente} = 1.2 \times \$0.0104 = \$0.0125 \text{ USD/hora} \implies \$8.99 \text{ USD/mes}$$
-3. **Ahorro económico logrado**:
-   $$\text{Ahorro} = \frac{0.0520 - 0.0125}{0.0520} \times 100\% = \mathbf{75.96\%}$$
-
-El controlador garantizó el cumplimiento del SLO con una reducción del 76% en costos de infraestructura frente al aprovisionamiento pico fijo.
-
-### 5.3 Fortalezas de la Solución
-1. **Inmunidad al "Flapping" (Efecto Serrucho)**: La combinación de histéresis temporal (`confirmCyclesDown=3`) y cooldown evita que el sistema gaste recursos destruyendo y recreando máquinas por fluctuaciones menores.
-2. **Asimetría Protectora**: Prioriza disponibilidad al escalar arriba (basta una métrica en alerta) y cautela al desescalar (todas deben estar bajas).
-3. **Resiliencia ante Fallos**: El método `rollback()` garantiza que si una instancia no supera el registro en el balanceador, se elimina inmediatamente, impidiendo que queden recursos "huérfanos" generando cobros ocultos.
-4. **Visibilidad Operacional**: El log detallado (`decisions.jsonl`) y los endpoints HTTP (`/status`) permiten auditar el estado del sistema en tiempo real sin requerir acceso SSH a las máquinas.
-
-### 5.4 Limitaciones Encontradas y Mejoras Futuras
-- **Latencia de aprovisionamiento de EC2**: Entre la agregación en CloudWatch (1-3 min) y el arranque de la máquina Ubuntu + Nginx (2 min), una instancia tarda entre 4 y 6 minutos en estar lista para recibir tráfico. Para mitigar esto, se podrían utilizar AMIs pre-horneadas (*golden AMIs*) o contenedores ECS/Fargate con menor tiempo de inicio.
-- **Bloqueo síncrono del bucle**: Durante el `_wait_running`, el hilo principal espera activamente. Se puede desacoplar el aprovisionamiento en un hilo en segundo plano (`threading.Thread`) para que el controlador continúe reportando estado.
-- **Cooldown simétrico**: Actualmente el tiempo de espera es igual para subir y para bajar (300 s). Sería más eficiente un cooldown agresivo para subir (ej. 120 s) y uno conservador para bajar (ej. 400 s).
-
----
+- 
 
 ## 6. Respuestas a las Preguntas de Sustentación (§12)
 
@@ -279,28 +222,3 @@ El costo fue de 1.2 instancias-hora promedio (\$0.0125 USD/hora). Mantener el SL
 Es mejor el que mantiene el SLO con **menor número de instancias-hora** y **menor número de transiciones de estado**. Se demuestra mediante la métrica de *eficiencia de provisión* y el costo monetario total: si ambos cumplen el SLO de latencia $< 0.5$ s, el que consumió 1.2 instancias promedio con 2 cambios de capacidad es objetivamente superior al que usó 3 instancias o realizó 10 transiciones (las cuales introducen riesgo de inestabilidad y sobrecostos por tiempo de calentamiento).
 
 ---
-
-## 7. Guía para la Demostración en Vivo (§10.5)
-
-Para la sustentación en vivo ante el docente, el procedimiento recomendado es:
-
-1. **Terminal 1 — Ver el Controller en acción:**
-   ```bash
-   python3 main.py -config conf.json -log decisions.jsonl
-   ```
-2. **Terminal 2 — Monitorear el log y el endpoint de estado:**
-   ```bash
-   # Ver en vivo las decisiones
-   tail -f decisions.jsonl | jq '{Cycle: .CycleID, Decisión: .Decision, Motivo: .Reason, Instancias: .CapacityBefore.Total}'
-   
-   # O consultar el endpoint HTTP
-   curl -s http://localhost:8080/status | jq .
-   ```
-3. **Terminal 3 — Inyectar carga:**
-   ```bash
-   # Carga rápida para disparar escala en vivo
-   ab -k -n 10000 -c 40 http://$(cat infra/state.env | grep LB_DNS | cut -d= -f2)/
-   ```
-4. **Verificación en Consola de AWS / ALB:**
-   Mostrar cómo la instancia pasa de `initial` a `healthy` en el Target Group y cómo el controlador anota `INCREASE_CAPACITY` en el ciclo correspondiente.
-
