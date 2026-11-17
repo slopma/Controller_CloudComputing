@@ -179,21 +179,33 @@ Procesando los 96 ciclos de la corrida experimental completa con `analysis/analy
 #### Gráficas de Evidencia Generadas:
 1. **Tráfico y Latencia en CloudWatch (`docs/cloudwatch_alb_metrics.png`)**:
    Muestra el pico de más de 4.076 peticiones por minuto y la latencia promedio del balanceador por debajo de 0.0007 s.
-   ![Métricas ALB](cloudwatch_alb_metrics.png)
+   <img width="1000" height="450" alt="cloudwatch_alb_metrics" src="https://github.com/user-attachments/assets/3598414c-2195-4307-a1ac-7d5a5220515e" />
+
 
 2. **Utilización de CPU en CloudWatch (`docs/cloudwatch_cpu_metrics.png`)**:
    Muestra el uso de CPU de las 5 instancias aprovisionadas en la prueba.
-   ![Métricas CPU](cloudwatch_cpu_metrics.png)
+   <img width="1000" height="450" alt="cloudwatch_cpu_metrics" src="https://github.com/user-attachments/assets/d58956f6-50d7-485e-b153-721126827cc9" />
+
 
 3. **Línea de Tiempo del Controlador (`decisions_analysis.png`)**:
    Correlaciona la capacidad de la flota (0 → 1 → 5 → 4 → 3) con las métricas y las decisiones tomadas ciclo a ciclo.
-   ![Análisis de Decisiones](../decisions_analysis.png)
+   <img width="1666" height="1178" alt="decisions_analysis" src="https://github.com/user-attachments/assets/3368e046-ec72-4bc7-bfa2-02fa5afc36ed" />
+
 
 ---
 
 ## 5. Evidencias de un ciclo completo
+-  <img width="500" height="125" alt="image" src="https://github.com/user-attachments/assets/b0b5780a-4a6e-462e-a599-97104726e99d" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/6e0eb2bd-35fb-496c-9c51-87f67df61792" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/5998544d-0e8f-4ca6-82a9-926d6c91da01" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/eac82eb4-36cc-46f7-ada2-0def89daa23b" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/d580b301-fb44-48e3-8ebf-77a71b6468fa" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/7cd7a622-6f9c-4340-bbc8-d2205b1d5be8" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/ae8aff02-0ef6-4645-b740-16bd7838f243" />
+-  <img width="561" height="131" alt="image" src="https://github.com/user-attachments/assets/66e2176a-0956-490a-b631-d8799ff1e96c" />
 
-- 
+
+
 
 ## 6. Respuestas a las Preguntas de Sustentación (§12)
 
