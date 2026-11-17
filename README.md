@@ -151,26 +151,3 @@ python3 analysis/analyze.py decisions.jsonl
 python3 analysis/analyze.py decisions.jsonl --no-plot
 ```
 
----
-
-## Pruebas (Tests)
-
-Para correr las pruebas unitarias:
-
-```bash
-pytest
-```
-
----
-
-## Cosas que tiene implementadas el controller
-
-1. **Histeresis temporal (`confirmCyclesDown`)**: para que no apague maquinas por bajones cortitos de trafico, pide que la carga este baja varios ciclos seguidos.
-2. **Persistencia del cooldown (`stateFile`)**: guarda en un archivo json la hora de la ultima accion, para que si se cae el programa no empiece a actuar a lo loco en el primer ciclo.
-3. **Pasos de escala configurables (`scaleUpStep` y `scaleDownStep`)**: para poder prender de a 1 o 2 maquinas si se quiere reaccionar mas rapido.
-4. **Server HTTP para healthcheck (`statusPort`)**: expone `/health` y `/status` para saber si el script sigue vivo.
-5. **Rollback de seguridad**: si una maquina no alcanza a prender o falla al registrarse en el target group, la apaga inmediatamente para no gastar plata en vano.
-6. **Scripts de apoyo**:
-   - `infra/up.sh` y `infra/down.sh` para crear y borrar la infra de prueba.
-   - `infra/load.sh` para meter carga de prueba con Apache Bench o hey.
-   - `analysis/analyze.py` para sacar estadisticas del log.
